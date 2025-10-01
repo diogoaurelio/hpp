@@ -126,6 +126,64 @@ aws s3 ls
 aws s3 cp file.txt s3://bucket/file.txt
 ```
 
+## Testing with MinIO
+
+For local development and testing, you can use MinIO as a local S3-compatible backend:
+
+### Setup MinIO
+```bash
+# Start MinIO services
+docker compose up -d
+
+# Copy environment variables for MinIO
+cp .env.example .env
+source .env
+
+# Start the S3 API
+cargo run --package s3-api
+```
+
+### MinIO Web Console
+Access MinIO console at: http://localhost:9001
+- Username: `admin`
+- Password: `admin123`
+
+### AWS CLI Testing with MinIO
+```bash
+# Configure AWS CLI profile for MinIO
+aws configure set aws_access_key_id admin --profile hpp-test
+aws configure set aws_secret_access_key admin123 --profile hpp-test
+aws configure set region us-east-1 --profile hpp-test
+aws configure set output json --profile hpp-test
+
+# Test direct MinIO connection
+aws s3 ls --profile hpp-test --endpoint-url http://localhost:9000
+
+# Test through your S3 API proxy
+aws s3 ls --profile hpp-test --endpoint-url http://localhost:8989
+
+# Create and test with buckets
+aws s3 mb s3://my-test-bucket --profile hpp-test --endpoint-url http://localhost:9000
+aws s3 ls --profile hpp-test --endpoint-url http://localhost:8989
+
+# Upload and download files
+echo "Hello World" > test.txt
+aws s3 cp test.txt s3://test-bucket/test.txt --profile hpp-test --endpoint-url http://localhost:9000
+aws s3 cp s3://test-bucket/test.txt downloaded.txt --profile hpp-test --endpoint-url http://localhost:8989
+```
+
+### curl Testing
+```bash
+# List buckets
+curl -v http://localhost:8989/
+
+# List objects in bucket
+curl -v http://localhost:8989/test-bucket
+
+# Get object
+curl -v http://localhost:8989/test-bucket/test.txt
+```
+
 ## Contributing
 
 1. Fork the repository
