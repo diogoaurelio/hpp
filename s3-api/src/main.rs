@@ -59,11 +59,11 @@ async fn main() -> Result<()> {
         .init();
 
     let access_key = std::env::var("AWS_ACCESS_KEY_ID")
-        .unwrap_or_else(|_| "secret".to_string());
+        .unwrap_or_else(|_| "admin".to_string());
     let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY")
-        .unwrap_or_else(|_| "supersecret".to_string());
+        .unwrap_or_else(|_| "admin123".to_string());
     let endpoint = std::env::var("AWS_ENDPOINT")
-        .unwrap_or_else(|_| "http://127.0.0.1:4567".to_string());
+        .unwrap_or_else(|_| "http://127.0.0.1:9000".to_string());
     let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "eu-central-1".to_string());
 
     let iam_url = std::env::var("IAM_API_URL")
