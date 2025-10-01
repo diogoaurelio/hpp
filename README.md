@@ -101,30 +101,163 @@ cargo run --package iam-api
 cargo run --package s3-api
 ```
 
-### API Usage
+### Local dev - API Usage
 
-#### Create IAM User
+#### Step 1: Create IAM User and Access Keys
+
+First, start both services:
+```bash
+# Terminal 1 - Start IAM service (port 8988)
+cargo run --package iam-api
+
+# Terminal 2 - Start S3 service (port 8989)
+cargo run --package s3-api
+```
+
+Create an IAM user:
 ```bash
 curl -X POST http://localhost:8988/ \
   -H "Content-Type: application/json" \
-  -d '{"user_name": "test-user", "path": "/"}'
+  -d '{"user_name": "hpp-user", "path": "/"}'
 ```
 
-#### Create Access Key
+Create access keys for the user and extract credentials:
 ```bash
-curl -X POST http://localhost:8988/users/test-user/access-keys
+# Create access keys and save the response
+RESPONSE=$(curl -s -X POST http://localhost:8988/users/hpp-user/access-keys)
+
+# Extract access key and secret using jq
+ACCESS_KEY=$(echo "$RESPONSE" | jq -r '.CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.access_key_id')
+SECRET_KEY=$(echo "$RESPONSE" | jq -r '.CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.secret_access_key')
+
+echo "Generated credentials:"
+echo "Access Key: $ACCESS_KEY"
+echo "Secret Key: $SECRET_KEY"
 ```
 
-#### S3 Operations (with AWS CLI)
+Alternative one-liner to extract both values:
 ```bash
-aws configure set aws_access_key_id YOUR_ACCESS_KEY
-aws configure set aws_secret_access_key YOUR_SECRET_KEY
-aws configure set default.region eu-central
-aws configure set default.s3.endpoint_url http://localhost:8989
-
-aws s3 ls
-aws s3 cp file.txt s3://bucket/file.txt
+curl -s -X POST http://localhost:8988/users/hpp-user/access-keys | jq -r '.CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey | "Access Key: \(.access_key_id)\nSecret Key: \(.secret_access_key)"'
 ```
+
+#### Step 2: Attach S3 Permissions Policy
+
+Attach the S3FullAccess policy to allow S3 operations:
+```bash
+curl -X POST http://localhost:8988/users/hpp-user/attached-policies \
+  -H "Content-Type: application/json" \
+  -d '{"policy_arn": "arn:aws:iam::aws:policy/AmazonS3FullAccess"}'
+```
+
+Alternative: Attach ReadOnly policy for limited access:
+```bash
+curl -X POST http://localhost:8988/users/hpp-user/attached-policies \
+  -H "Content-Type: application/json" \
+  -d '{"policy_arn": "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"}'
+```
+
+#### Step 3: Configure AWS CLI Profile
+
+Configure your AWS CLI profile with the extracted credentials:
+```bash
+# Using the variables from Step 1
+aws configure set aws_access_key_id "$ACCESS_KEY" --profile hpp
+aws configure set aws_secret_access_key "$SECRET_KEY" --profile hpp
+aws configure set region eu-central-1 --profile hpp
+aws configure set output json --profile hpp
+
+# Verify the configuration
+aws configure list --profile hpp
+```
+
+**Complete automated setup script:**
+```bash
+#!/bin/bash
+# Complete HPP user setup script
+
+echo "Creating IAM user..."
+curl -s -X POST http://localhost:8988/ \
+  -H "Content-Type: application/json" \
+  -d '{"user_name": "hpp-user", "path": "/"}' | jq .
+
+echo "Creating access keys..."
+RESPONSE=$(curl -s -X POST http://localhost:8988/users/hpp-user/access-keys)
+ACCESS_KEY=$(echo "$RESPONSE" | jq -r '.CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.access_key_id')
+SECRET_KEY=$(echo "$RESPONSE" | jq -r '.CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.secret_access_key')
+
+echo "Generated credentials:"
+echo "Access Key: $ACCESS_KEY"
+echo "Secret Key: $SECRET_KEY"
+
+echo "Attaching S3FullAccess policy..."
+curl -s -X POST http://localhost:8988/users/hpp-user/attached-policies \
+  -H "Content-Type: application/json" \
+  -d '{"policy_arn": "arn:aws:iam::aws:policy/AmazonS3FullAccess"}' | jq .
+
+echo "Configuring AWS CLI profile..."
+aws configure set aws_access_key_id "$ACCESS_KEY" --profile hpp
+aws configure set aws_secret_access_key "$SECRET_KEY" --profile hpp
+aws configure set region eu-central-1 --profile hpp
+aws configure set output json --profile hpp
+
+echo "Setup complete! Test with:"
+echo "aws s3 ls --profile hpp --endpoint-url http://localhost:8989"
+```
+
+**Quick setup script:**
+Use the provided setup script:
+```bash
+./bin/setup-hpp-user.sh
+```
+
+This script will automatically:
+- Create the IAM user
+- Generate and extract access keys using jq
+- Attach the S3FullAccess policy
+- Configure your AWS CLI profile
+- Test the authorization
+
+Make sure the script is executable:
+```bash
+chmod +x bin/setup-hpp-user.sh
+```
+
+#### Step 4: Test S3 Operations
+
+```bash
+# List all buckets
+aws s3 ls --profile hpp --endpoint-url http://localhost:8989
+
+# Create a bucket
+aws s3 mb s3://my-bucket --profile hpp --endpoint-url http://localhost:8989
+
+# List objects in a bucket
+aws s3 ls s3://my-bucket --profile hpp --endpoint-url http://localhost:8989
+
+# Upload a file
+echo "Hello HPP!" > test.txt
+aws s3 cp test.txt s3://my-bucket/test.txt --profile hpp --endpoint-url http://localhost:8989
+
+# Download a file
+aws s3 cp s3://my-bucket/test.txt downloaded.txt --profile hpp --endpoint-url http://localhost:8989
+
+# Delete a file
+aws s3 rm s3://my-bucket/test.txt --profile hpp --endpoint-url http://localhost:8989
+```
+
+#### Troubleshooting
+
+If you get a 403 Forbidden error:
+1. Verify the IAM user exists: `curl http://localhost:8988/users/hpp-user`
+2. Check the access keys: `curl http://localhost:8988/users/hpp-user/access-keys`
+3. Verify authorization works:
+   ```bash
+   curl -X POST http://localhost:8988/authorize \
+     -H "Content-Type: application/json" \
+     -d '{"access_key_id": "YOUR_ACCESS_KEY", "action": "s3:ListBucket", "resource": "arn:aws:s3:::my-bucket", "context": {}}'
+   ```
+4. Make sure both IAM and S3 services are running
+5. Check the server logs for detailed error messages
 
 ## Testing with MinIO
 
