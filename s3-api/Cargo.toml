@@ -1,0 +1,33 @@
+[package]
+name = "s3-api"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "s3-api"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+quick-xml = { workspace = true }
+aws-sigv4 = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+shared = { path = "../shared", features = ["testing"] }
+s3-core = { path = "../s3-core", features = ["testing"] }
+
+[dev-dependencies]
+mockall = "0.12"
+tokio-test = "0.4"
+tower = "0.5"

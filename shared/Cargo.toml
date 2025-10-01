@@ -1,0 +1,19 @@
+[package]
+name = "shared"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+testing = ["mockall"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
+aws-config = "1.1"
+aws-sdk-s3 = "1.18"
+mockall = { version = "0.12", optional = true }
