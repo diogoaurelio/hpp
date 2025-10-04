@@ -1,31 +1,38 @@
 # HPP Cloud Infrastructure
 
-A Rust-based cloud infrastructure project that provides AWS S3 and IAM compatible APIs, meant to support augmenting Hetzner Cloud (thus H++ name).
+A Rust-based cloud infrastructure project that provides AWS S3, IAM, and Bedrock compatible APIs, meant to support augmenting Hetzner Cloud (thus H++ name).
 
 ## Project Goals
 
 - **Cloud Abstraction**: Create a cloud platform on top of Hetzner Cloud infrastructure
-- **AWS Compatibility**: Provide S3 and IAM APIs that are compatible with existing AWS tools and SDKs
+- **AWS Compatibility**: Provide S3, IAM, and Bedrock APIs that are compatible with existing AWS tools and SDKs
+- **AI/ML Integration**: Offer vector database and embedding services compatible with AWS Bedrock
 - **Cost Optimization**: Leverage Hetzner's competitive pricing while maintaining AWS API compatibility
-- **Security**: Implement proper IAM-based authorization for all S3 operations
+- **Security**: Implement proper IAM-based authorization for all operations
 - **Scalability**: Design a modular architecture that can be extended with additional AWS-compatible services
 
 ## Architecture Overview
 
 ```
-hpp-iam/
+hpp-core/
 ├── s3-core/          # S3 business logic + Hetzner Object Storage integration
-├── s3-api/           # S3 HTTP server (port 8080)
-├── iam-core/         # IAM business logic + policy evaluation engine  
-├── iam-api/          # IAM HTTP server (port 8081)
+├── s3-api/           # S3 HTTP server (port 8989)
+├── iam-core/         # IAM business logic + policy evaluation engine
+├── iam-api/          # IAM HTTP server (port 8988)
+├── bedrock-core/     # Vector database + embedding engine
+├── bedrock-api/      # Bedrock HTTP server (AWS Bedrock compatible)
 └── shared/           # Common error types and utilities
 ```
 
 ### Service Flow
 ```
-AWS S3 Client → S3 API (8080) → IAM API (8081) → Hetzner Object Storage
+AWS S3 Client → S3 API (8989) → IAM API (8988) → Hetzner Object Storage
                     ↓                ↓
                [Authorization]  [Policy Check]
+
+AWS Bedrock Client → Bedrock API → Vector Database + Embedding Engine
+                         ↓              ↓
+                    [Document CRUD]  [Similarity Search]
 ```
 
 ## Key Features
@@ -43,6 +50,28 @@ AWS S3 Client → S3 API (8080) → IAM API (8081) → Hetzner Object Storage
 - **Policy Engine**: Evaluate IAM policies for authorization decisions
 - **Built-in Policies**: Pre-configured S3 access policies (FullAccess, ReadOnly)
 - **JSON API**: AWS IAM-compatible JSON responses
+
+### Bedrock Vector Database Service
+- **AWS Bedrock Compatibility**: Full compatibility with AWS Bedrock embedding and text generation APIs
+- **Vector Database**: High-performance vector storage and similarity search
+- **Multiple Storage Backends**: In-memory and S3-backed persistence options
+- **Embedding Models**: Support for AWS Titan, Cohere, and HuggingFace models
+- **Similarity Metrics**: Cosine similarity, Euclidean distance, and dot product
+- **Document Management**: CRUD operations for vector documents with metadata
+- **Model Registry**: AWS-to-HuggingFace model mapping with dimension compatibility
+- **Comprehensive Testing**: 62+ tests covering all functionality
+
+#### Supported Models
+- **AWS Titan**: `amazon.titan-embed-text-v1` (1536 dimensions), `amazon.titan-embed-text-v2:0` (1024 dimensions)
+- **Cohere**: `cohere.embed-english-v3` (1024 dimensions), `cohere.embed-multilingual-v3` (1024 dimensions)
+- **HuggingFace Models**: Automatic mapping to equivalent open-source models with dimension projection
+
+#### Vector Database Features
+- **Storage Options**: In-memory for development, S3-backed for production
+- **Search Capabilities**: Similarity search with configurable thresholds and limits
+- **Metadata Filtering**: Filter search results by custom metadata fields
+- **Pagination**: Support for large document collections with limit/offset
+- **Multiple Similarity Metrics**: Choose between cosine, euclidean, or dot product similarity
 
 ### Security & Authorization
 - **Request Validation**: Parse and validate AWS4-HMAC-SHA256 signatures
@@ -86,9 +115,16 @@ AWS S3 Client → S3 API (8080) → IAM API (8081) → Hetzner Object Storage
 ```bash
 # Hetzner Object Storage
 AWS_ACCESS_KEY_ID=your_access_key
-AWS_SECRET_ACCESS_KEY=your_secret_key  
+AWS_SECRET_ACCESS_KEY=your_secret_key
 AWS_ENDPOINT=https://fsn1.your-objectstorage.com
 AWS_REGION=eu-central
+
+# Bedrock Service Configuration
+USE_HUGGINGFACE_EMBEDDINGS=true  # Enable HuggingFace model integration
+HF_MODELS_TO_LOAD=sentence-transformers/all-MiniLM-L6-v2,sentence-transformers/all-mpnet-base-v2
+HF_CACHE_DIR=./hf_cache  # Directory to cache downloaded models
+BEDROCK_STORAGE_BACKEND=s3  # Options: memory, s3
+BEDROCK_S3_BUCKET=bedrock-vectors  # S3 bucket for vector storage
 ```
 
 ### Running the Services
@@ -97,8 +133,26 @@ AWS_REGION=eu-central
 # Start IAM service (port 8988)
 cargo run --package iam-api
 
-# Start S3 service (port 8989)  
+# Start S3 service (port 8989)
 cargo run --package s3-api
+
+# Start Bedrock service (AWS Bedrock compatible)
+cargo run --package bedrock-api
+```
+
+### Running All Services with Docker
+```bash
+# Start MinIO (S3-compatible storage) + all services
+docker compose up -d
+
+# Copy environment configuration
+cp .env.example .env
+source .env
+
+# Run all services in parallel
+cargo run --package iam-api &
+cargo run --package s3-api &
+cargo run --package bedrock-api &
 ```
 
 ### Local dev - API Usage
@@ -316,6 +370,317 @@ curl -v http://localhost:8989/test-bucket
 # Get object
 curl -v http://localhost:8989/test-bucket/test.txt
 ```
+
+## Bedrock API Usage
+
+The Bedrock API provides AWS-compatible embedding and vector database functionality.
+
+### Start Bedrock Service
+```bash
+# Start the Bedrock service
+cargo run --package bedrock-api
+
+# The service will be available at http://localhost:3000 (default)
+```
+
+### Creating Embeddings
+
+Create embeddings using AWS Bedrock-compatible models:
+
+```bash
+# Create embedding using AWS Titan model
+curl -X POST http://localhost:3000/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_id": "amazon.titan-embed-text-v1",
+    "input_text": "Machine learning is revolutionizing technology"
+  }'
+
+# Response includes embedding vector and token count
+# {
+#   "embedding": [0.1234, -0.5678, ...],  // 1536 dimensions for Titan v1
+#   "input_token_count": 8
+# }
+```
+
+### Document Management
+
+Create, retrieve, update, and delete vector documents:
+
+```bash
+# Create a document with automatic embedding generation
+curl -X POST http://localhost:3000/documents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "tech-doc-1",
+    "content": "Artificial intelligence and machine learning are transforming industries",
+    "metadata": {
+      "category": "technology",
+      "topic": "AI"
+    }
+  }'
+
+# List all documents
+curl http://localhost:3000/documents
+
+# Get a specific document
+curl http://localhost:3000/documents/tech-doc-1
+
+# Update a document
+curl -X PUT http://localhost:3000/documents/tech-doc-1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Updated content about AI and ML",
+    "metadata": {
+      "category": "technology",
+      "topic": "AI",
+      "updated": "2024-01-01"
+    }
+  }'
+
+# Delete a document
+curl -X DELETE http://localhost:3000/documents/tech-doc-1
+```
+
+### Vector Search
+
+Perform similarity search on your document collection:
+
+```bash
+# Search for similar documents
+curl -X POST http://localhost:3000/documents/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "artificial intelligence",
+    "limit": 5,
+    "similarity_threshold": 0.7,
+    "metadata_filter": {
+      "category": "technology"
+    }
+  }'
+
+# Response includes ranked results with similarity scores
+# {
+#   "results": [
+#     {
+#       "document": {
+#         "id": "tech-doc-1",
+#         "content": "AI content...",
+#         "metadata": {...},
+#         "created_at": "2024-01-01T00:00:00Z"
+#       },
+#       "similarity_score": 0.95
+#     }
+#   ],
+#   "total_count": 1
+# }
+```
+
+### Model Invocation (AWS Bedrock Compatible)
+
+Invoke models directly using the AWS Bedrock API format:
+
+```bash
+# Invoke embedding model
+curl -X POST http://localhost:3000/model/amazon.titan-embed-text-v1/invoke \
+  -H "Content-Type: application/json" \
+  -d '{
+    "inputText": "Text to embed"
+  }'
+
+# Invoke text generation model (if supported)
+curl -X POST http://localhost:3000/model/anthropic.claude-v2/invoke \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "What is machine learning?",
+    "max_tokens_to_sample": 100
+  }'
+```
+
+### Using with AWS SDK
+
+You can use the AWS SDK with the Bedrock service by pointing it to your local endpoint:
+
+```python
+import boto3
+
+# Configure boto3 client for local Bedrock service
+bedrock = boto3.client(
+    'bedrock-runtime',
+    endpoint_url='http://localhost:3000',
+    region_name='us-east-1',
+    aws_access_key_id='dummy',  # Not validated in local mode
+    aws_secret_access_key='dummy'
+)
+
+# Create embeddings
+response = bedrock.invoke_model(
+    modelId='amazon.titan-embed-text-v1',
+    contentType='application/json',
+    accept='application/json',
+    body=json.dumps({
+        'inputText': 'Machine learning is transforming technology'
+    })
+)
+
+result = json.loads(response['body'].read())
+embedding = result['embedding']
+print(f"Generated embedding with {len(embedding)} dimensions")
+```
+
+### Configuration Options
+
+Configure the Bedrock service using environment variables:
+
+```bash
+# Enable HuggingFace model integration (requires internet for model downloads)
+export USE_HUGGINGFACE_EMBEDDINGS=true
+export HF_MODELS_TO_LOAD="sentence-transformers/all-MiniLM-L6-v2,sentence-transformers/all-mpnet-base-v2"
+export HF_CACHE_DIR="./hf_cache"
+
+# Storage backend configuration
+export BEDROCK_STORAGE_BACKEND=s3  # Options: memory, s3
+export BEDROCK_S3_BUCKET=bedrock-vectors
+
+# Service configuration
+export BEDROCK_PORT=3000
+export BEDROCK_HOST=0.0.0.0
+```
+
+### Testing the Complete Pipeline
+
+Test the entire Bedrock pipeline with a complete workflow:
+
+```bash
+#!/bin/bash
+# Complete Bedrock testing script
+
+echo "1. Creating embedding..."
+curl -X POST http://localhost:3000/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model_id": "amazon.titan-embed-text-v1", "input_text": "AI and machine learning"}' | jq .
+
+echo -e "\n2. Creating documents..."
+curl -X POST http://localhost:3000/documents \
+  -H "Content-Type: application/json" \
+  -d '{"id": "doc1", "content": "Artificial intelligence is changing the world", "metadata": {"category": "AI"}}' | jq .
+
+curl -X POST http://localhost:3000/documents \
+  -H "Content-Type: application/json" \
+  -d '{"id": "doc2", "content": "Machine learning algorithms for data science", "metadata": {"category": "ML"}}' | jq .
+
+echo -e "\n3. Listing documents..."
+curl http://localhost:3000/documents | jq .
+
+echo -e "\n4. Searching for similar documents..."
+curl -X POST http://localhost:3000/documents/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "AI and ML technologies", "limit": 5}' | jq .
+
+echo -e "\n5. Getting specific document..."
+curl http://localhost:3000/documents/doc1 | jq .
+
+echo -e "\nBedrock API test complete!"
+```
+
+Make the script executable and run it:
+```bash
+chmod +x test-bedrock.sh
+./test-bedrock.sh
+```
+
+## Testing
+
+The project includes comprehensive test suites for all components.
+
+### Running All Tests
+```bash
+# Run all tests across the workspace
+cargo test --workspace
+
+# Run tests for specific packages
+cargo test --package bedrock-core
+cargo test --package bedrock-api
+cargo test --package iam-core
+cargo test --package s3-core
+```
+
+### Test Coverage
+
+#### Bedrock Core (62 tests)
+- **Unit Tests**: 52 tests covering:
+  - Embedding engines (in-memory and HuggingFace mock)
+  - Vector stores with different similarity metrics (Cosine, Euclidean, DotProduct)
+  - Model mapping and AWS-HuggingFace compatibility
+  - Service layer functionality
+  - Error handling and edge cases
+
+- **Integration Tests**: 10 comprehensive tests covering:
+  - Complete BedrockService workflow
+  - Multi-document operations and search
+  - Large document set handling (50+ documents)
+  - Concurrent operations
+  - Different similarity metrics validation
+  - Trait compliance testing
+
+#### Test Features
+- **Mock HuggingFace Implementation**: Sophisticated deterministic embedding generation
+- **AWS Model Compatibility**: Full testing of AWS-to-HuggingFace model mappings
+- **Similarity Testing**: Validates all similarity metrics work correctly (-1 to 1 range)
+- **Edge Case Coverage**: Empty content, special characters, very long documents
+- **Performance Testing**: Large dataset operations and concurrent access
+
+### Running Specific Test Suites
+```bash
+# Run only unit tests
+cargo test --lib --package bedrock-core
+
+# Run only integration tests
+cargo test integration_tests --package bedrock-core
+
+# Run HuggingFace-specific tests
+cargo test huggingface --package bedrock-core
+
+# Run with output for debugging
+cargo test -- --nocapture
+
+# Run ignored tests (require internet connection)
+cargo test -- --ignored
+```
+
+### Test Environment Setup
+```bash
+# For HuggingFace integration tests (requires internet)
+export USE_HUGGINGFACE_EMBEDDINGS=true
+export HF_CACHE_DIR=./test_cache
+
+# For S3 backend tests
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_ENDPOINT=http://localhost:9000
+export AWS_REGION=us-east-1
+
+# Run MinIO for S3 testing
+docker compose up -d minio
+```
+
+### Performance Benchmarks
+```bash
+# Run benchmark tests (in release mode)
+cargo test --release benchmark --package bedrock-core -- --ignored
+
+# Example benchmark results:
+# - 10,000 dimension projections: <1ms
+# - 1,000 similarity calculations: <10ms
+# - Large dataset search (50 docs): <5ms
+```
+
+### Continuous Integration
+The test suite is designed to run in CI environments:
+- All tests pass without external dependencies
+- Mock implementations for ML models
+- Deterministic test results
+- No network requirements for core tests
 
 ## Contributing
 
