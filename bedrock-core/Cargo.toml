@@ -1,0 +1,34 @@
+[package]
+name = "bedrock-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+shared = { path = "../shared" }
+async-trait = "0.1"
+
+# Hugging Face integration (optional)
+candle-core = { version = "0.9", optional = true }
+candle-nn = { version = "0.9", optional = true }
+candle-transformers = { version = "0.9", optional = true }
+hf-hub = { version = "0.4", optional = true }
+tokenizers = { version = "0.22", optional = true }
+
+# Alternative: ONNX Runtime
+# ort = "1.16"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.12"
+futures = "0.3"
+
+[features]
+testing = ["shared/testing"]
+huggingface = ["candle-core", "candle-nn", "candle-transformers", "hf-hub", "tokenizers"]

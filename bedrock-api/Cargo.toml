@@ -1,0 +1,27 @@
+[package]
+name = "bedrock-api"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bedrock-api"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+bedrock-core = { path = "../bedrock-core" }
+shared = { path = "../shared" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tower = "0.5"
+mockall = "0.12"
+futures = "0.3"
