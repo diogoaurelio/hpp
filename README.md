@@ -6,7 +6,7 @@ A Rust-based cloud infrastructure project that provides AWS S3, IAM, and Bedrock
 
 - **Cloud Abstraction**: Create a cloud platform on top of Hetzner Cloud infrastructure
 - **AWS Compatibility**: Provide S3, IAM, and Bedrock APIs that are compatible with existing AWS tools and SDKs
-- **AI/ML Integration**: Offer vector database and embedding services compatible with AWS Bedrock
+- **AI/ML Integration**: Offer embedding services compatible with AWS Bedrock and vector database services compatible with AWS S3 Vectors
 - **Cost Optimization**: Leverage Hetzner's competitive pricing while maintaining AWS API compatibility
 - **Security**: Implement proper IAM-based authorization for all operations
 - **Scalability**: Design a modular architecture that can be extended with additional AWS-compatible services
@@ -15,11 +15,11 @@ A Rust-based cloud infrastructure project that provides AWS S3, IAM, and Bedrock
 
 ```
 hpp-core/
-├── s3-core/          # S3 business logic + Hetzner Object Storage integration
-├── s3-api/           # S3 HTTP server (port 8989)
+├── s3-core/          # S3 business logic + S3 Vectors + Hetzner Object Storage integration
+├── s3-api/           # S3 HTTP server (port 8989) + S3 Vectors API
 ├── iam-core/         # IAM business logic + policy evaluation engine
 ├── iam-api/          # IAM HTTP server (port 8988)
-├── bedrock-core/     # Vector database + embedding engine
+├── bedrock-core/     # Bedrock embedding engine (models only)
 ├── bedrock-api/      # Bedrock HTTP server (AWS Bedrock compatible)
 └── shared/           # Common error types and utilities
 ```
@@ -30,9 +30,13 @@ AWS S3 Client → S3 API (8989) → IAM API (8988) → Hetzner Object Storage
                     ↓                ↓
                [Authorization]  [Policy Check]
 
-AWS Bedrock Client → Bedrock API → Vector Database + Embedding Engine
-                         ↓              ↓
-                    [Document CRUD]  [Similarity Search]
+S3 Vectors Client → S3 API (8989) → Vector Database (S3 Vectors)
+                        ↓              ↓
+                   [Document CRUD]  [Similarity Search]
+
+AWS Bedrock Client → Bedrock API → Embedding Engine (Models Only)
+                        ↓              ↓
+                   [Text Input]   [Generate Embeddings]
 ```
 
 ## Key Features
@@ -51,33 +55,74 @@ AWS Bedrock Client → Bedrock API → Vector Database + Embedding Engine
 - **Built-in Policies**: Pre-configured S3 access policies (FullAccess, ReadOnly)
 - **JSON API**: AWS IAM-compatible JSON responses
 
-### Bedrock Vector Database Service
+### Bedrock Embedding Service
 - **AWS Bedrock Compatibility**: Full compatibility with AWS Bedrock embedding and text generation APIs
+- **Foundation Models**: Support for text generation and embedding models
+- **Embedding Models**: Support for AWS Titan, Cohere, and HuggingFace models
+- **Model Registry**: AWS-to-HuggingFace model mapping with dimension compatibility
+- **Text Generation**: Mock text generation responses for development
+
+### S3 Vectors Service
+- **AWS S3 Vectors Compatibility**: Compatible with AWS S3 Vector bucket operations
 - **Vector Database**: High-performance vector storage and similarity search
 - **Multiple Storage Backends**: In-memory and S3-backed persistence options
-- **Embedding Models**: Support for AWS Titan, Cohere, and HuggingFace models
 - **Similarity Metrics**: Cosine similarity, Euclidean distance, and dot product
 - **Document Management**: CRUD operations for vector documents with metadata
-- **Model Registry**: AWS-to-HuggingFace model mapping with dimension compatibility
-- **Comprehensive Testing**: 62+ tests covering all functionality
+- **Comprehensive Testing**: Full test coverage for all vector operations
 
-#### Supported Models
+#### Bedrock Supported Models
 - **AWS Titan**: `amazon.titan-embed-text-v1` (1536 dimensions), `amazon.titan-embed-text-v2:0` (1024 dimensions)
 - **Cohere**: `cohere.embed-english-v3` (1024 dimensions), `cohere.embed-multilingual-v3` (1024 dimensions)
 - **HuggingFace Models**: Automatic mapping to equivalent open-source models with dimension projection
 
-#### Vector Database Features
+#### S3 Vectors Features
 - **Storage Options**: In-memory for development, S3-backed for production
 - **Search Capabilities**: Similarity search with configurable thresholds and limits
 - **Metadata Filtering**: Filter search results by custom metadata fields
 - **Pagination**: Support for large document collections with limit/offset
 - **Multiple Similarity Metrics**: Choose between cosine, euclidean, or dot product similarity
+- **Vector Bucket Management**: Create and manage vector buckets with configurable similarity metrics
+- **RESTful API**: Full HTTP API for vector operations via S3 API server
 
 ### Security & Authorization
 - **Request Validation**: Parse and validate AWS4-HMAC-SHA256 signatures
 - **Policy Evaluation**: Fine-grained access control using IAM policies
 - **Access Key Authentication**: Secure access key and secret key validation
 - **Resource-based Permissions**: Support for bucket and object-level permissions
+
+## API Endpoints
+
+### S3 Standard API (Port 8989)
+- `GET /` - List buckets
+- `GET /{bucket}` - List objects in bucket
+- `PUT /{bucket}` - Create bucket
+- `GET /{bucket}/{key}` - Get object
+- `PUT /{bucket}/{key}` - Put object
+- `DELETE /{bucket}/{key}` - Delete object
+
+### S3 Vectors API (Port 8989)
+- `PUT /vectors/{bucket}` - Create vector bucket
+- `GET /vectors/{bucket}/documents` - List vector documents
+- `GET /vectors/{bucket}/documents/{document_id}` - Get vector document
+- `PUT /vectors/{bucket}/documents/{document_id}` - Store vector document
+- `DELETE /vectors/{bucket}/documents/{document_id}` - Delete vector document
+- `POST /vectors/{bucket}/search` - Search similar vectors
+
+### IAM API (Port 8988)
+- `POST /users` - Create user
+- `GET /users/{username}` - Get user
+- `PUT /users/{username}` - Update user
+- `DELETE /users/{username}` - Delete user
+- `POST /users/{username}/access-keys` - Create access key
+- `GET /users/{username}/access-keys` - List access keys
+- `DELETE /users/{username}/access-keys/{access-key-id}` - Delete access key
+- `POST /authorize` - Authorize request
+
+### Bedrock API
+- `POST /model/amazon.titan-embed-text-v1/invoke` - Generate embeddings
+- `POST /model/{model_id}/invoke` - Invoke foundation model
+- `GET /foundation-models` - List available models
+- `GET /foundation-models/{model_id}` - Get model details
 
 ## Next Steps
 
@@ -152,7 +197,7 @@ source .env
 # Run all services in parallel
 cargo run --package iam-api &
 cargo run --package s3-api &
-cargo run --package bedrock-api &
+cargo run --package bedrock-api
 ```
 
 ### Local dev - API Usage
