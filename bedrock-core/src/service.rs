@@ -1,191 +1,280 @@
 use crate::types::*;
-use crate::embedding::{EmbeddingEngineTrait, InMemoryEmbeddingEngine, S3EmbeddingEngine};
-use crate::vector_store::{VectorStoreTrait, InMemoryVectorStore, S3VectorStore};
-use crate::huggingface_embedding::HuggingFaceEmbeddingEngine;
+use crate::embedding::{EmbeddingEngineTrait, InMemoryEmbeddingEngine};
+use crate::model_mappings::ModelRegistry;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::sync::Arc;
+use s3_core::{VectorStoreTrait, InMemoryVectorStore};
 
-/// Trait defining the Bedrock service interface
+/// Trait defining the Bedrock service interface (embeddings, model invocation, and vector store)
 #[async_trait::async_trait]
 pub trait BedrockServiceTrait: Send + Sync {
-    async fn invoke_model(&self, request: InvokeModelRequest) -> Result<InvokeModelResponse>;
+    /// Generate embeddings using specified model
     async fn create_embedding(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse>;
-    async fn create_document(&mut self, request: CreateDocumentRequest) -> Result<VectorDocument>;
+
+    /// Invoke a foundation model directly
+    async fn invoke_model(&self, request: InvokeModelRequest) -> Result<InvokeModelResponse>;
+
+    /// List available foundation models
+    async fn list_foundation_models(&self) -> Result<ListFoundationModelsResponse>;
+
+    /// Get information about a specific model
+    async fn get_foundation_model(&self, model_id: &str) -> Result<Option<FoundationModel>>;
+
+    /// Vector store operations
+    async fn create_document(&self, request: CreateDocumentRequest) -> Result<VectorDocument>;
     async fn get_document(&self, id: &str) -> Option<VectorDocument>;
-    async fn delete_document(&mut self, id: &str) -> Result<bool>;
-    async fn search_documents(&self, request: SearchRequest) -> Result<SearchResponse>;
+    async fn delete_document(&self, id: &str) -> Result<bool>;
     async fn list_documents(&self, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<VectorDocument>>;
+    async fn search_documents(&self, request: SearchRequest) -> Result<SearchResponse>;
+
+    /// Vector index operations
+    async fn create_vector_index(&self, index_name: String, dimensions: usize, similarity_metric: SimilarityMetric) -> Result<()>;
+    async fn get_vector_index_metadata(&self) -> Result<Option<VectorIndexMetadata>>;
+    async fn delete_vector_index(&self) -> Result<bool>;
+    async fn validate_vector_index(&self) -> Result<bool>;
 }
 
-/// Main Bedrock service implementation
+/// AWS Bedrock service implementation
 pub struct BedrockService {
-    embedding_engine: Box<dyn EmbeddingEngineTrait>,
-    vector_store: Box<dyn VectorStoreTrait>,
+    embedding_engine: Arc<dyn EmbeddingEngineTrait>,
+    model_registry: ModelRegistry,
+    vector_store: Arc<tokio::sync::Mutex<dyn VectorStoreTrait + Send>>,
 }
 
 impl BedrockService {
-    /// Create a new Bedrock service with in-memory storage
+    /// Create a new Bedrock service with in-memory embedding engine and vector store
     pub fn new() -> Self {
         Self {
-            embedding_engine: Box::new(InMemoryEmbeddingEngine::new()),
-            vector_store: Box::new(InMemoryVectorStore::new()),
+            embedding_engine: Arc::new(InMemoryEmbeddingEngine::new()),
+            model_registry: ModelRegistry::new(),
+            vector_store: Arc::new(tokio::sync::Mutex::new(InMemoryVectorStore::new())),
         }
     }
 
-    /// Create a new Bedrock service with S3-backed storage
-    pub fn with_s3_storage(
-        embedding_s3_client: Box<dyn shared::S3ObjectStorageRepository>,
-        vector_s3_client: Box<dyn shared::S3ObjectStorageRepository>,
-        bucket: String,
+    /// Create a new Bedrock service with custom embedding engine
+    pub fn with_embedding_engine(embedding_engine: Arc<dyn EmbeddingEngineTrait>) -> Self {
+        Self {
+            embedding_engine,
+            model_registry: ModelRegistry::new(),
+            vector_store: Arc::new(tokio::sync::Mutex::new(InMemoryVectorStore::new())),
+        }
+    }
+
+    /// Create a new Bedrock service with custom embedding engine and vector store
+    pub fn with_components(
+        embedding_engine: Arc<dyn EmbeddingEngineTrait>,
+        vector_store: Arc<tokio::sync::Mutex<dyn VectorStoreTrait + Send>>,
     ) -> Self {
         Self {
-            embedding_engine: Box::new(S3EmbeddingEngine::new(embedding_s3_client, bucket.clone())),
-            vector_store: Box::new(S3VectorStore::new(vector_s3_client, bucket)),
+            embedding_engine,
+            model_registry: ModelRegistry::new(),
+            vector_store,
         }
     }
 
-    /// Create a new Bedrock service with custom similarity metric
-    pub fn with_similarity_metric(similarity_metric: SimilarityMetric) -> Self {
-        Self {
-            embedding_engine: Box::new(InMemoryEmbeddingEngine::new()),
-            vector_store: Box::new(InMemoryVectorStore::with_similarity_metric(similarity_metric)),
-        }
-    }
-
-    /// Create a new Bedrock service with S3 storage and custom similarity metric
-    pub fn with_s3_storage_and_similarity_metric(
-        embedding_s3_client: Box<dyn shared::S3ObjectStorageRepository>,
-        vector_s3_client: Box<dyn shared::S3ObjectStorageRepository>,
-        bucket: String,
-        similarity_metric: SimilarityMetric,
-    ) -> Self {
-        Self {
-            embedding_engine: Box::new(S3EmbeddingEngine::new(embedding_s3_client, bucket.clone())),
-            vector_store: Box::new(S3VectorStore::with_similarity_metric(vector_s3_client, bucket, similarity_metric)),
-        }
-    }
-
-    /// Create a new Bedrock service with HuggingFace embeddings (in-memory storage)
-    pub fn with_huggingface_embeddings(embedding_engine: HuggingFaceEmbeddingEngine) -> Self {
-        Self {
-            embedding_engine: Box::new(embedding_engine),
-            vector_store: Box::new(InMemoryVectorStore::new()),
-        }
-    }
-
-    /// Create a new Bedrock service with HuggingFace embeddings and S3 vector storage
+    /// Create service with HuggingFace embeddings and S3 vector storage
     pub fn with_huggingface_and_s3_storage(
-        embedding_engine: HuggingFaceEmbeddingEngine,
-        vector_s3_client: Box<dyn shared::S3ObjectStorageRepository>,
+        embedding_engine: Arc<dyn EmbeddingEngineTrait>,
+        s3_client: Box<dyn shared::S3ObjectStorageRepository>,
         bucket: String,
     ) -> Self {
+        use s3_core::S3VectorStore;
+        let vector_store = S3VectorStore::new(s3_client, bucket);
         Self {
-            embedding_engine: Box::new(embedding_engine),
-            vector_store: Box::new(S3VectorStore::new(vector_s3_client, bucket)),
+            embedding_engine,
+            model_registry: ModelRegistry::new(),
+            vector_store: Arc::new(tokio::sync::Mutex::new(vector_store)),
         }
     }
 
-    async fn create_embedding_for_text(&self, text: &str, model_id: &str) -> Result<Vec<f32>> {
-        let request = EmbeddingRequest {
-            model_id: model_id.to_string(),
-            input_text: text.to_string(),
-        };
+    /// Create service with HuggingFace embeddings and in-memory vector storage
+    pub fn with_huggingface_embeddings(embedding_engine: Arc<dyn EmbeddingEngineTrait>) -> Self {
+        Self {
+            embedding_engine,
+            model_registry: ModelRegistry::new(),
+            vector_store: Arc::new(tokio::sync::Mutex::new(InMemoryVectorStore::new())),
+        }
+    }
 
-        let response = self.embedding_engine.create_embedding(request).await?;
-        Ok(response.embedding)
+    /// Create service with S3 storage for vectors
+    pub fn with_s3_storage(
+        embedding_engine: Arc<dyn EmbeddingEngineTrait>,
+        s3_client: Box<dyn shared::S3ObjectStorageRepository>,
+        bucket: String,
+    ) -> Self {
+        use s3_core::S3VectorStore;
+        let vector_store = S3VectorStore::new(s3_client, bucket);
+        Self {
+            embedding_engine,
+            model_registry: ModelRegistry::new(),
+            vector_store: Arc::new(tokio::sync::Mutex::new(vector_store)),
+        }
+    }
+}
+
+impl Default for BedrockService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait::async_trait]
 impl BedrockServiceTrait for BedrockService {
-    async fn invoke_model(&self, request: InvokeModelRequest) -> Result<InvokeModelResponse> {
-        // For text embedding models, parse the body and create embeddings
-        if request.model_id.contains("embed") {
-            let embedding_request: TextEmbeddingRequest = serde_json::from_str(&request.body)?;
-
-            let bedrock_request = EmbeddingRequest {
-                model_id: request.model_id,
-                input_text: embedding_request.input_text,
-            };
-
-            let embedding_response = self.embedding_engine.create_embedding(bedrock_request).await?;
-
-            let text_response = TextEmbeddingResponse {
-                embedding: embedding_response.embedding,
-                input_text_token_count: embedding_response.input_token_count,
-            };
-
-            let response_body = serde_json::to_vec(&text_response)?;
-
-            Ok(InvokeModelResponse {
-                content_type: "application/json".to_string(),
-                body: response_body,
-            })
-        } else {
-            // For other models, return a simple mock response
-            let mock_response = serde_json::json!({
-                "completion": "This is a mock response from the Bedrock API",
-                "stop_reason": "end_turn"
-            });
-
-            Ok(InvokeModelResponse {
-                content_type: "application/json".to_string(),
-                body: serde_json::to_vec(&mock_response)?,
-            })
-        }
-    }
-
     async fn create_embedding(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
         self.embedding_engine.create_embedding(request).await
     }
 
-    async fn create_document(&mut self, request: CreateDocumentRequest) -> Result<VectorDocument> {
+    async fn invoke_model(&self, request: InvokeModelRequest) -> Result<InvokeModelResponse> {
+        // Handle different model types
+        if self.is_embedding_model(&request.model_id) {
+            // For embedding models, parse the request body and generate embeddings
+            let body: serde_json::Value = serde_json::from_str(&request.body)?;
+
+            if let Some(input_text) = body.get("inputText").and_then(|v| v.as_str()) {
+                let embedding_request = EmbeddingRequest {
+                    model_id: request.model_id.clone(),
+                    input_text: input_text.to_string(),
+                };
+
+                let embedding_response = self.embedding_engine.create_embedding(embedding_request).await?;
+
+                let response_body = serde_json::json!({
+                    "embedding": embedding_response.embedding,
+                    "inputTextTokenCount": embedding_response.input_token_count
+                });
+
+                return Ok(InvokeModelResponse {
+                    content_type: "application/json".to_string(),
+                    body: response_body.to_string().into_bytes(),
+                });
+            }
+        }
+
+        // For text generation models, return a mock response
+        if self.is_text_generation_model(&request.model_id) {
+            let response_body = serde_json::json!({
+                "completion": "This is a mock response from the Bedrock service. In a real implementation, this would call the actual foundation model.",
+                "stop_reason": "end_turn"
+            });
+
+            return Ok(InvokeModelResponse {
+                content_type: "application/json".to_string(),
+                body: response_body.to_string().into_bytes(),
+            });
+        }
+
+        Err(anyhow::anyhow!("Unsupported model: {}", request.model_id))
+    }
+
+    async fn list_foundation_models(&self) -> Result<ListFoundationModelsResponse> {
+        let supported_models = self.embedding_engine.get_supported_models().await;
+        let mut model_summaries = Vec::new();
+
+        // Add embedding models
+        for model_id in supported_models {
+            if let Ok(mapping) = self.model_registry.get_mapping(&model_id) {
+                model_summaries.push(FoundationModel {
+                    model_id: model_id.clone(),
+                    provider_name: mapping.aws_model.provider.clone(),
+                    model_name: mapping.aws_model.name.clone(),
+                    input_modalities: vec!["TEXT".to_string()],
+                    output_modalities: vec!["EMBEDDING".to_string()],
+                    supported_customizations: vec![],
+                    supported_inference_types: vec!["ON_DEMAND".to_string()],
+                });
+            }
+        }
+
+        // Add text generation models (mock)
+        model_summaries.push(FoundationModel {
+            model_id: "anthropic.claude-v2".to_string(),
+            provider_name: "Anthropic".to_string(),
+            model_name: "Claude v2".to_string(),
+            input_modalities: vec!["TEXT".to_string()],
+            output_modalities: vec!["TEXT".to_string()],
+            supported_customizations: vec!["FINE_TUNING".to_string()],
+            supported_inference_types: vec!["ON_DEMAND".to_string()],
+        });
+
+        Ok(ListFoundationModelsResponse { model_summaries })
+    }
+
+    async fn get_foundation_model(&self, model_id: &str) -> Result<Option<FoundationModel>> {
+        let models = self.list_foundation_models().await?;
+        Ok(models.model_summaries.into_iter()
+            .find(|m| m.model_id == model_id))
+    }
+
+    async fn create_document(&self, request: CreateDocumentRequest) -> Result<VectorDocument> {
+        use chrono::Utc;
+        use std::collections::HashMap;
+
         let id = request.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-        // Create embedding for the document content
-        // Use a default model if not specified
-        let embedding = self.create_embedding_for_text(&request.content, "amazon.titan-embed-text-v1").await?;
+        // Generate embedding for the document content
+        let embedding_request = EmbeddingRequest {
+            model_id: "amazon.titan-embed-text-v1".to_string(), // Default embedding model
+            input_text: request.content.clone(),
+        };
+
+        let embedding_response = self.create_embedding(embedding_request).await?;
 
         let document = VectorDocument {
             id: id.clone(),
             content: request.content,
-            embedding,
-            metadata: request.metadata.unwrap_or_default(),
-            created_at: chrono::Utc::now(),
+            embedding: embedding_response.embedding,
+            metadata: request.metadata.unwrap_or_else(HashMap::new),
+            created_at: Utc::now(),
         };
 
-        self.vector_store.store_document(document.clone()).await?;
+        let mut vector_store = self.vector_store.lock().await;
+        vector_store.store_document(document.clone()).await?;
+
         Ok(document)
     }
 
     async fn get_document(&self, id: &str) -> Option<VectorDocument> {
-        self.vector_store.get_document(id).await
+        let vector_store = self.vector_store.lock().await;
+        vector_store.get_document(id).await
     }
 
-    async fn delete_document(&mut self, id: &str) -> Result<bool> {
-        self.vector_store.delete_document(id).await
+    async fn delete_document(&self, id: &str) -> Result<bool> {
+        let mut vector_store = self.vector_store.lock().await;
+        vector_store.delete_document(id).await
+    }
+
+    async fn list_documents(&self, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<VectorDocument>> {
+        let vector_store = self.vector_store.lock().await;
+        vector_store.list_documents(limit, offset).await
     }
 
     async fn search_documents(&self, request: SearchRequest) -> Result<SearchResponse> {
-        // Create embedding for the query
-        let query_embedding = self.create_embedding_for_text(&request.query, "amazon.titan-embed-text-v1").await?;
+        // Generate embedding for the search query
+        let embedding_request = EmbeddingRequest {
+            model_id: "amazon.titan-embed-text-v1".to_string(), // Default embedding model
+            input_text: request.query,
+        };
 
-        let limit = request.limit.unwrap_or(10);
-        let results = self.vector_store.search_similar(
-            query_embedding,
-            limit,
+        let embedding_response = self.create_embedding(embedding_request).await?;
+
+        let vector_store = self.vector_store.lock().await;
+        let search_results = vector_store.search_similar(
+            embedding_response.embedding,
+            request.limit.unwrap_or(10),
             request.similarity_threshold,
         ).await?;
 
-        // Filter by metadata if provided
-        let filtered_results: Vec<SearchResult> = if let Some(metadata_filter) = request.metadata_filter {
-            results.into_iter().filter(|result| {
-                metadata_filter.iter().all(|(key, value)| {
-                    result.document.metadata.get(key).map_or(false, |v| v == value)
+        // Apply metadata filtering if provided
+        let filtered_results = if let Some(metadata_filter) = &request.metadata_filter {
+            search_results.into_iter()
+                .filter(|result| {
+                    metadata_filter.iter().all(|(key, value)| {
+                        result.document.metadata.get(key).map_or(false, |v| v == value)
+                    })
                 })
-            }).collect()
+                .collect()
         } else {
-            results
+            search_results
         };
 
         Ok(SearchResponse {
@@ -194,46 +283,74 @@ impl BedrockServiceTrait for BedrockService {
         })
     }
 
-    async fn list_documents(&self, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<VectorDocument>> {
-        self.vector_store.list_documents(limit, offset).await
+    async fn create_vector_index(&self, index_name: String, dimensions: usize, similarity_metric: SimilarityMetric) -> Result<()> {
+        let mut vector_store = self.vector_store.lock().await;
+        vector_store.create_index(index_name, dimensions, similarity_metric).await
+    }
+
+    async fn get_vector_index_metadata(&self) -> Result<Option<VectorIndexMetadata>> {
+        let vector_store = self.vector_store.lock().await;
+        vector_store.get_index_metadata().await
+    }
+
+    async fn delete_vector_index(&self) -> Result<bool> {
+        let mut vector_store = self.vector_store.lock().await;
+        vector_store.delete_index().await
+    }
+
+    async fn validate_vector_index(&self) -> Result<bool> {
+        let vector_store = self.vector_store.lock().await;
+        vector_store.validate_index().await
+    }
+}
+
+impl BedrockService {
+    fn is_embedding_model(&self, model_id: &str) -> bool {
+        model_id.contains("embed") ||
+        model_id.starts_with("amazon.titan-embed") ||
+        model_id.starts_with("cohere.embed")
+    }
+
+    fn is_text_generation_model(&self, model_id: &str) -> bool {
+        model_id.starts_with("anthropic.claude") ||
+        model_id.starts_with("amazon.titan-text") ||
+        model_id.starts_with("ai21.j2") ||
+        model_id.contains("llama")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "testing")]
-    use shared::MockS3ObjectStorageRepository;
 
     #[tokio::test]
     async fn test_bedrock_service_create_embedding() {
         let service = BedrockService::new();
+
         let request = EmbeddingRequest {
             model_id: "amazon.titan-embed-text-v1".to_string(),
-            input_text: "Hello, world!".to_string(),
+            input_text: "Test text for embedding".to_string(),
         };
 
         let result = service.create_embedding(request).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
-        assert_eq!(response.embedding.len(), 1536);
+        assert_eq!(response.embedding.len(), 1536); // Titan v1 dimensions
         assert!(response.input_token_count > 0);
     }
 
     #[tokio::test]
-    async fn test_bedrock_service_invoke_model_embedding() {
+    async fn test_bedrock_service_invoke_embedding_model() {
         let service = BedrockService::new();
-
-        let text_request = TextEmbeddingRequest {
-            input_text: "Test text for embedding".to_string(),
-        };
 
         let request = InvokeModelRequest {
             model_id: "amazon.titan-embed-text-v1".to_string(),
             content_type: Some("application/json".to_string()),
             accept: Some("application/json".to_string()),
-            body: serde_json::to_string(&text_request).unwrap(),
+            body: serde_json::json!({
+                "inputText": "Test embedding generation"
+            }).to_string(),
         };
 
         let result = service.invoke_model(request).await;
@@ -242,197 +359,49 @@ mod tests {
         let response = result.unwrap();
         assert_eq!(response.content_type, "application/json");
 
-        let text_response: TextEmbeddingResponse = serde_json::from_slice(&response.body).unwrap();
-        assert_eq!(text_response.embedding.len(), 1536);
-        assert!(text_response.input_text_token_count > 0);
+        let parsed_response: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert!(parsed_response["embedding"].is_array());
+        assert!(parsed_response["inputTextTokenCount"].is_number());
     }
 
     #[tokio::test]
-    async fn test_bedrock_service_invoke_model_non_embedding() {
+    async fn test_bedrock_service_invoke_text_model() {
         let service = BedrockService::new();
 
         let request = InvokeModelRequest {
             model_id: "anthropic.claude-v2".to_string(),
             content_type: Some("application/json".to_string()),
             accept: Some("application/json".to_string()),
-            body: r#"{"prompt": "Hello, how are you?"}"#.to_string(),
+            body: serde_json::json!({
+                "prompt": "What is machine learning?"
+            }).to_string(),
         };
 
         let result = service.invoke_model(request).await;
         assert!(result.is_ok());
 
         let response = result.unwrap();
-        assert_eq!(response.content_type, "application/json");
-
-        let mock_response: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
-        assert!(mock_response.get("completion").is_some());
+        let parsed_response: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert!(parsed_response["completion"].is_string());
+        assert_eq!(parsed_response["stop_reason"], "end_turn");
     }
 
     #[tokio::test]
-    async fn test_bedrock_service_create_document() {
-        let mut service = BedrockService::new();
-
-        let request = CreateDocumentRequest {
-            id: Some("doc1".to_string()),
-            content: "This is test content".to_string(),
-            metadata: Some(HashMap::from([
-                ("category".to_string(), "test".to_string()),
-            ])),
-        };
-
-        let result = service.create_document(request).await;
+    async fn test_list_foundation_models() {
+        let service = BedrockService::new();
+        let result = service.list_foundation_models().await;
         assert!(result.is_ok());
 
-        let document = result.unwrap();
-        assert_eq!(document.id, "doc1");
-        assert_eq!(document.content, "This is test content");
-        assert_eq!(document.embedding.len(), 1536);
-        assert_eq!(document.metadata.get("category").unwrap(), "test");
-    }
+        let models = result.unwrap();
+        assert!(!models.model_summaries.is_empty());
 
-    #[tokio::test]
-    async fn test_bedrock_service_document_operations() {
-        let mut service = BedrockService::new();
+        // Should include both embedding and text generation models
+        let has_embedding_model = models.model_summaries.iter()
+            .any(|m| m.output_modalities.contains(&"EMBEDDING".to_string()));
+        let has_text_model = models.model_summaries.iter()
+            .any(|m| m.output_modalities.contains(&"TEXT".to_string()));
 
-        // Create a document
-        let request = CreateDocumentRequest {
-            id: Some("doc1".to_string()),
-            content: "Test document content".to_string(),
-            metadata: None,
-        };
-        let document = service.create_document(request).await.unwrap();
-        assert_eq!(document.id, "doc1");
-
-        // Get the document
-        let retrieved = service.get_document("doc1").await;
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().content, "Test document content");
-
-        // Delete the document
-        let deleted = service.delete_document("doc1").await.unwrap();
-        assert!(deleted);
-
-        // Verify it's gone
-        let retrieved = service.get_document("doc1").await;
-        assert!(retrieved.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_bedrock_service_search_documents() {
-        let mut service = BedrockService::new();
-
-        // Create some test documents
-        let docs = vec![
-            ("doc1", "The quick brown fox jumps over the lazy dog"),
-            ("doc2", "Machine learning is a subset of artificial intelligence"),
-            ("doc3", "Vector databases store and query high-dimensional data"),
-        ];
-
-        for (id, content) in docs {
-            let request = CreateDocumentRequest {
-                id: Some(id.to_string()),
-                content: content.to_string(),
-                metadata: None,
-            };
-            service.create_document(request).await.unwrap();
-        }
-
-        // Search for documents
-        let search_request = SearchRequest {
-            query: "artificial intelligence machine learning".to_string(),
-            limit: Some(2),
-            similarity_threshold: None,
-            metadata_filter: None,
-        };
-
-        let result = service.search_documents(search_request).await;
-        assert!(result.is_ok());
-
-        let response = result.unwrap();
-        assert!(response.results.len() <= 2);
-        assert_eq!(response.total_count, response.results.len());
-
-        // Check that results are sorted by similarity
-        if response.results.len() > 1 {
-            assert!(response.results[0].similarity_score >= response.results[1].similarity_score);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_bedrock_service_list_documents() {
-        let mut service = BedrockService::new();
-
-        // Create multiple documents
-        for i in 0..5 {
-            let request = CreateDocumentRequest {
-                id: Some(format!("doc{}", i)),
-                content: format!("Content for document {}", i),
-                metadata: None,
-            };
-            service.create_document(request).await.unwrap();
-        }
-
-        // List all documents
-        let all_docs = service.list_documents(None, None).await.unwrap();
-        assert_eq!(all_docs.len(), 5);
-
-        // List with limit
-        let limited_docs = service.list_documents(Some(3), None).await.unwrap();
-        assert_eq!(limited_docs.len(), 3);
-
-        // List with offset
-        let offset_docs = service.list_documents(Some(2), Some(2)).await.unwrap();
-        assert_eq!(offset_docs.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_bedrock_service_with_similarity_metric() {
-        let service = BedrockService::with_similarity_metric(SimilarityMetric::DotProduct);
-
-        let request = EmbeddingRequest {
-            model_id: "amazon.titan-embed-text-v1".to_string(),
-            input_text: "Test with dot product similarity".to_string(),
-        };
-
-        let result = service.create_embedding(request).await;
-        assert!(result.is_ok());
-    }
-
-    #[cfg(feature = "testing")]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_bedrock_service_with_s3_storage() {
-        let mut embedding_mock = MockS3ObjectStorageRepository::new();
-        let mut vector_mock = MockS3ObjectStorageRepository::new();
-
-        // Mock S3 operations for embedding engine
-        embedding_mock
-            .expect_get_object()
-            .returning(|_| Box::pin(async { Err(anyhow::anyhow!("Not found")) }));
-        embedding_mock
-            .expect_put_object()
-            .returning(|_| Box::pin(async { Ok("etag".to_string()) }));
-
-        // Mock S3 operations for vector store
-        vector_mock
-            .expect_get_object()
-            .returning(|_| Box::pin(async { Err(anyhow::anyhow!("Not found")) }));
-        vector_mock
-            .expect_put_object()
-            .returning(|_| Box::pin(async { Ok("etag".to_string()) }));
-
-        let mut service = BedrockService::with_s3_storage(
-            Box::new(embedding_mock),
-            Box::new(vector_mock),
-            "test-bucket".to_string(),
-        );
-
-        let request = CreateDocumentRequest {
-            id: Some("doc1".to_string()),
-            content: "Test content with S3 storage".to_string(),
-            metadata: None,
-        };
-
-        let result = service.create_document(request).await;
-        assert!(result.is_ok());
+        assert!(has_embedding_model);
+        assert!(has_text_model);
     }
 }

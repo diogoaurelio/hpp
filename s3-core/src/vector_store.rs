@@ -1,22 +1,30 @@
-use crate::types::*;
+use crate::vector_types::*;
 use anyhow::Result;
 use std::collections::HashMap;
 
 /// Trait defining the vector store interface
 #[async_trait::async_trait]
 pub trait VectorStoreTrait: Send + Sync {
+    // Document operations
     async fn store_document(&mut self, document: VectorDocument) -> Result<()>;
     async fn get_document(&self, id: &str) -> Option<VectorDocument>;
     async fn delete_document(&mut self, id: &str) -> Result<bool>;
     async fn search_similar(&self, query_embedding: Vec<f32>, limit: usize, threshold: Option<f32>) -> Result<Vec<SearchResult>>;
     async fn list_documents(&self, limit: Option<usize>, offset: Option<usize>) -> Result<Vec<VectorDocument>>;
     async fn count_documents(&self) -> Result<usize>;
+
+    // Index operations
+    async fn create_index(&mut self, index_name: String, dimensions: usize, similarity_metric: SimilarityMetric) -> Result<()>;
+    async fn get_index_metadata(&self) -> Result<Option<VectorIndexMetadata>>;
+    async fn delete_index(&mut self) -> Result<bool>;
+    async fn validate_index(&self) -> Result<bool>;
 }
 
 /// In-memory vector store
 pub struct InMemoryVectorStore {
     documents: HashMap<String, VectorDocument>,
     similarity_metric: SimilarityMetric,
+    index_metadata: Option<VectorIndexMetadata>,
 }
 
 impl InMemoryVectorStore {
@@ -24,6 +32,7 @@ impl InMemoryVectorStore {
         Self {
             documents: HashMap::new(),
             similarity_metric: SimilarityMetric::default(),
+            index_metadata: None,
         }
     }
 
@@ -31,6 +40,16 @@ impl InMemoryVectorStore {
         Self {
             documents: HashMap::new(),
             similarity_metric,
+            index_metadata: None,
+        }
+    }
+
+    pub fn with_index(index_name: String, dimensions: usize, similarity_metric: SimilarityMetric) -> Self {
+        let index_metadata = VectorIndexMetadata::new(index_name, dimensions, similarity_metric);
+        Self {
+            documents: HashMap::new(),
+            similarity_metric,
+            index_metadata: Some(index_metadata),
         }
     }
 
@@ -71,7 +90,20 @@ impl InMemoryVectorStore {
 #[async_trait::async_trait]
 impl VectorStoreTrait for InMemoryVectorStore {
     async fn store_document(&mut self, document: VectorDocument) -> Result<()> {
+        // Validate document against index if index exists
+        if let Some(ref index) = self.index_metadata {
+            index.validate_document(&document)
+                .map_err(|e| anyhow::anyhow!("Document validation failed: {}", e))?;
+        }
+
         self.documents.insert(document.id.clone(), document);
+
+        // Update document count in index metadata
+        if let Some(ref mut index) = self.index_metadata {
+            index.document_count = self.documents.len();
+            index.last_modified = chrono::Utc::now();
+        }
+
         Ok(())
     }
 
@@ -133,44 +165,124 @@ impl VectorStoreTrait for InMemoryVectorStore {
     async fn count_documents(&self) -> Result<usize> {
         Ok(self.documents.len())
     }
+
+    async fn create_index(&mut self, index_name: String, dimensions: usize, similarity_metric: SimilarityMetric) -> Result<()> {
+        if self.index_metadata.is_some() {
+            return Err(anyhow::anyhow!("Index already exists"));
+        }
+
+        let index_metadata = VectorIndexMetadata::new(index_name, dimensions, similarity_metric);
+        self.index_metadata = Some(index_metadata);
+        self.similarity_metric = similarity_metric;
+
+        Ok(())
+    }
+
+    async fn get_index_metadata(&self) -> Result<Option<VectorIndexMetadata>> {
+        Ok(self.index_metadata.clone())
+    }
+
+    async fn delete_index(&mut self) -> Result<bool> {
+        if self.index_metadata.is_some() {
+            self.index_metadata = None;
+            self.documents.clear();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn validate_index(&self) -> Result<bool> {
+        match &self.index_metadata {
+            Some(index) => {
+                // Validate all documents against the index
+                for document in self.documents.values() {
+                    if let Err(_) = index.validate_document(document) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            None => Ok(false), // No index exists
+        }
+    }
 }
 
 /// S3-backed vector store
 pub struct S3VectorStore {
     s3_client: Box<dyn shared::S3ObjectStorageRepository>,
     bucket: String,
-    similarity_metric: SimilarityMetric,
+    index_name: String,
     // Cache for performance
     documents_cache: tokio::sync::RwLock<Option<HashMap<String, VectorDocument>>>,
+    index_metadata_cache: tokio::sync::RwLock<Option<VectorIndexMetadata>>,
 }
 
 impl S3VectorStore {
     pub fn new(s3_client: Box<dyn shared::S3ObjectStorageRepository>, bucket: String) -> Self {
         Self {
             s3_client,
-            bucket,
-            similarity_metric: SimilarityMetric::default(),
+            bucket: bucket.clone(),
+            index_name: format!("{}-default-index", bucket),
             documents_cache: tokio::sync::RwLock::new(None),
+            index_metadata_cache: tokio::sync::RwLock::new(None),
         }
     }
 
-    pub fn with_similarity_metric(
+    pub fn with_index(
         s3_client: Box<dyn shared::S3ObjectStorageRepository>,
         bucket: String,
-        similarity_metric: SimilarityMetric,
+        index_name: String,
     ) -> Self {
         Self {
             s3_client,
             bucket,
-            similarity_metric,
+            index_name,
             documents_cache: tokio::sync::RwLock::new(None),
+            index_metadata_cache: tokio::sync::RwLock::new(None),
         }
+    }
+
+    async fn load_index_metadata(&self) -> Result<Option<VectorIndexMetadata>> {
+        let request = shared::GetObjectRequest {
+            bucket: self.bucket.clone(),
+            key: format!("vectors/indexes/{}/metadata.json", self.index_name),
+        };
+
+        match self.s3_client.get_object(request).await {
+            Ok(response) => {
+                let data = String::from_utf8(response.body.to_vec())?;
+                let metadata: VectorIndexMetadata = serde_json::from_str(&data)?;
+                Ok(Some(metadata))
+            }
+            Err(_) => {
+                // Index doesn't exist yet
+                Ok(None)
+            }
+        }
+    }
+
+    async fn save_index_metadata(&self, metadata: &VectorIndexMetadata) -> Result<()> {
+        let data = serde_json::to_string_pretty(metadata)?;
+        let request = shared::PutObjectRequest {
+            bucket: self.bucket.clone(),
+            key: format!("vectors/indexes/{}/metadata.json", self.index_name),
+            body: bytes::Bytes::from(data),
+            content_type: Some("application/json".to_string()),
+            metadata: HashMap::new(),
+        };
+
+        self.s3_client.put_object(request).await?;
+
+        // Update cache
+        *self.index_metadata_cache.write().await = Some(metadata.clone());
+        Ok(())
     }
 
     async fn load_documents(&self) -> Result<HashMap<String, VectorDocument>> {
         let request = shared::GetObjectRequest {
             bucket: self.bucket.clone(),
-            key: "vectors/documents.json".to_string(),
+            key: format!("vectors/indexes/{}/documents.json", self.index_name),
         };
 
         match self.s3_client.get_object(request).await {
@@ -190,7 +302,7 @@ impl S3VectorStore {
         let data = serde_json::to_string_pretty(documents)?;
         let request = shared::PutObjectRequest {
             bucket: self.bucket.clone(),
-            key: "vectors/documents.json".to_string(),
+            key: format!("vectors/indexes/{}/documents.json", self.index_name),
             body: bytes::Bytes::from(data),
             content_type: Some("application/json".to_string()),
             metadata: HashMap::new(),
@@ -198,8 +310,8 @@ impl S3VectorStore {
 
         self.s3_client.put_object(request).await?;
 
-        // Invalidate cache
-        *self.documents_cache.write().await = None;
+        // Update cache
+        *self.documents_cache.write().await = Some(documents.clone());
         Ok(())
     }
 
@@ -215,12 +327,29 @@ impl S3VectorStore {
         Ok(documents)
     }
 
-    fn calculate_similarity(&self, embedding1: &[f32], embedding2: &[f32]) -> f32 {
+    async fn get_index_metadata_cached(&self) -> Result<Option<VectorIndexMetadata>> {
+        let cache_read = self.index_metadata_cache.read().await;
+        if let Some(ref cached_metadata) = *cache_read {
+            return Ok(Some(cached_metadata.clone()));
+        }
+        drop(cache_read);
+
+        let metadata = self.load_index_metadata().await?;
+        *self.index_metadata_cache.write().await = metadata.clone();
+        Ok(metadata)
+    }
+
+    async fn calculate_similarity(&self, embedding1: &[f32], embedding2: &[f32]) -> f32 {
         if embedding1.len() != embedding2.len() {
             return 0.0;
         }
 
-        match self.similarity_metric {
+        let similarity_metric = match self.get_index_metadata_cached().await {
+            Ok(Some(metadata)) => metadata.similarity_metric,
+            _ => SimilarityMetric::default(),
+        };
+
+        match similarity_metric {
             SimilarityMetric::Cosine => {
                 let dot_product: f32 = embedding1.iter().zip(embedding2).map(|(a, b)| a * b).sum();
                 let norm1: f32 = embedding1.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -252,9 +381,23 @@ impl S3VectorStore {
 #[async_trait::async_trait]
 impl VectorStoreTrait for S3VectorStore {
     async fn store_document(&mut self, document: VectorDocument) -> Result<()> {
+        // Validate document against index if index exists
+        if let Some(index) = self.get_index_metadata_cached().await? {
+            index.validate_document(&document)
+                .map_err(|e| anyhow::anyhow!("Document validation failed: {}", e))?;
+        }
+
         let mut documents = self.get_documents_cached().await?;
         documents.insert(document.id.clone(), document);
         self.save_documents(&documents).await?;
+
+        // Update document count in index metadata
+        if let Some(mut index) = self.get_index_metadata_cached().await? {
+            index.document_count = documents.len();
+            index.last_modified = chrono::Utc::now();
+            self.save_index_metadata(&index).await?;
+        }
+
         Ok(())
     }
 
@@ -277,16 +420,14 @@ impl VectorStoreTrait for S3VectorStore {
     async fn search_similar(&self, query_embedding: Vec<f32>, limit: usize, threshold: Option<f32>) -> Result<Vec<SearchResult>> {
         let documents = self.get_documents_cached().await?;
 
-        let mut results: Vec<SearchResult> = documents
-            .values()
-            .map(|doc| {
-                let similarity = self.calculate_similarity(&query_embedding, &doc.embedding);
-                SearchResult {
-                    document: doc.clone(),
-                    similarity_score: similarity,
-                }
-            })
-            .collect();
+        let mut results: Vec<SearchResult> = Vec::new();
+        for doc in documents.values() {
+            let similarity = self.calculate_similarity(&query_embedding, &doc.embedding).await;
+            results.push(SearchResult {
+                document: doc.clone(),
+                similarity_score: similarity,
+            });
+        }
 
         // Filter by threshold if provided
         if let Some(threshold) = threshold {
@@ -326,6 +467,73 @@ impl VectorStoreTrait for S3VectorStore {
     async fn count_documents(&self) -> Result<usize> {
         let documents = self.get_documents_cached().await?;
         Ok(documents.len())
+    }
+
+    async fn create_index(&mut self, index_name: String, dimensions: usize, similarity_metric: SimilarityMetric) -> Result<()> {
+        // Check if index already exists
+        if self.get_index_metadata_cached().await?.is_some() {
+            return Err(anyhow::anyhow!("Index already exists"));
+        }
+
+        // Create index metadata
+        let index_metadata = VectorIndexMetadata::new(index_name.clone(), dimensions, similarity_metric);
+
+        // Save index metadata to S3
+        self.save_index_metadata(&index_metadata).await?;
+
+        // Update index name if provided
+        self.index_name = index_name;
+
+        Ok(())
+    }
+
+    async fn get_index_metadata(&self) -> Result<Option<VectorIndexMetadata>> {
+        self.get_index_metadata_cached().await
+    }
+
+    async fn delete_index(&mut self) -> Result<bool> {
+        let metadata_exists = self.get_index_metadata_cached().await?.is_some();
+
+        if metadata_exists {
+            // Delete index metadata
+            let delete_metadata_request = shared::DeleteObjectRequest {
+                bucket: self.bucket.clone(),
+                key: format!("vectors/indexes/{}/metadata.json", self.index_name),
+            };
+            let _ = self.s3_client.delete_object(delete_metadata_request).await;
+
+            // Delete documents
+            let delete_documents_request = shared::DeleteObjectRequest {
+                bucket: self.bucket.clone(),
+                key: format!("vectors/indexes/{}/documents.json", self.index_name),
+            };
+            let _ = self.s3_client.delete_object(delete_documents_request).await;
+
+            // Clear caches
+            *self.index_metadata_cache.write().await = None;
+            *self.documents_cache.write().await = None;
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    async fn validate_index(&self) -> Result<bool> {
+        match self.get_index_metadata_cached().await? {
+            Some(index) => {
+                let documents = self.get_documents_cached().await?;
+
+                // Validate all documents against the index
+                for document in documents.values() {
+                    if let Err(_) = index.validate_document(document) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            None => Ok(false), // No index exists
+        }
     }
 }
 

@@ -33,7 +33,7 @@ pub async fn invoke_model(
         body: body.to_string(),
     };
 
-    let service = state.bedrock_service.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let service = &state.bedrock_service;
 
     match service.invoke_model(request).await {
         Ok(response) => {
@@ -64,7 +64,7 @@ pub async fn create_embedding(
         input_text: request.input_text,
     };
 
-    let service = state.bedrock_service.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let service = &state.bedrock_service;
 
     match service.create_embedding(embedding_request).await {
         Ok(response) => Ok(Json(TextEmbeddingResponse {
@@ -86,7 +86,7 @@ pub async fn list_documents(
     State(state): State<AppState>,
     Query(params): Query<ListDocumentsQuery>,
 ) -> Result<Json<Vec<VectorDocument>>, StatusCode> {
-    let service = state.bedrock_service.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let service = &state.bedrock_service;
 
     match service.list_documents(params.limit, params.offset).await {
         Ok(documents) => Ok(Json(documents)),
@@ -99,7 +99,7 @@ pub async fn create_document(
     State(state): State<AppState>,
     Json(request): Json<CreateDocumentRequest>,
 ) -> Result<Json<VectorDocument>, StatusCode> {
-    let mut service = state.bedrock_service.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let service = &state.bedrock_service;
 
     match service.create_document(request).await {
         Ok(document) => Ok(Json(document)),
@@ -112,7 +112,7 @@ pub async fn get_document(
     State(state): State<AppState>,
     Path(document_id): Path<String>,
 ) -> Result<Json<VectorDocument>, StatusCode> {
-    let service = state.bedrock_service.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let service = &state.bedrock_service;
 
     match service.get_document(&document_id).await {
         Some(document) => Ok(Json(document)),
@@ -125,7 +125,7 @@ pub async fn delete_document(
     State(state): State<AppState>,
     Path(document_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut service = state.bedrock_service.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let service = &state.bedrock_service;
 
     match service.delete_document(&document_id).await {
         Ok(existed) => {
@@ -147,7 +147,7 @@ pub async fn search_documents(
     State(state): State<AppState>,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, StatusCode> {
-    let service = state.bedrock_service.lock().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let service = &state.bedrock_service;
 
     match service.search_documents(request).await {
         Ok(response) => Ok(Json(response)),
@@ -164,13 +164,13 @@ mod tests {
         Router,
     };
     use bedrock_core::BedrockService;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     fn create_test_app() -> Router {
         let bedrock_service = BedrockService::new();
         let state = AppState {
-            bedrock_service: Arc::new(Mutex::new(bedrock_service)) as Arc<Mutex<dyn BedrockServiceTrait + Send>>,
+            bedrock_service: Arc::new(bedrock_service) as Arc<dyn BedrockServiceTrait + Send + Sync>,
         };
 
         Router::new()

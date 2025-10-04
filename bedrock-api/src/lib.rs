@@ -3,9 +3,9 @@ pub mod handlers;
 pub mod integration_tests;
 
 use bedrock_core::BedrockServiceTrait;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub bedrock_service: Arc<Mutex<dyn BedrockServiceTrait + Send>>,
+    pub bedrock_service: Arc<dyn BedrockServiceTrait + Send + Sync>,
 }

@@ -1,5 +1,6 @@
 mod auth;
 mod handlers;
+mod vector_handlers;
 
 use anyhow::Result;
 use axum::{
@@ -84,12 +85,20 @@ async fn main() -> Result<()> {
     };
 
     let app = Router::new()
+        // Standard S3 API routes
         .route("/", get(handlers::list_buckets))
         .route("/:bucket", get(handlers::list_objects))
         .route("/:bucket", put(handlers::create_bucket))
         .route("/:bucket/:key", get(handlers::get_object))
         .route("/:bucket/:key", put(handlers::put_object))
         .route("/:bucket/:key", delete(handlers::delete_object))
+        // S3 Vectors API routes
+        .route("/vectors/:bucket", put(vector_handlers::create_vector_bucket))
+        .route("/vectors/:bucket/documents", get(vector_handlers::list_vector_documents))
+        .route("/vectors/:bucket/documents/:document_id", get(vector_handlers::get_vector_document))
+        .route("/vectors/:bucket/documents/:document_id", put(vector_handlers::put_vector_document))
+        .route("/vectors/:bucket/documents/:document_id", delete(vector_handlers::delete_vector_document))
+        .route("/vectors/:bucket/search", axum::routing::post(vector_handlers::search_vectors))
         .layer(middleware::from_fn_with_state(state.clone(), auth::iam_auth_middleware))
         .layer(middleware::from_fn(log_request_middleware))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB max

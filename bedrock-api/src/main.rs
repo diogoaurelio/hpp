@@ -4,8 +4,8 @@ use axum::{
     Router,
 };
 use bedrock_api::{handlers, AppState};
-use bedrock_core::{BedrockService, BedrockServiceTrait, create_huggingface_engine};
-use std::sync::{Arc, Mutex};
+use bedrock_core::{BedrockService, BedrockServiceTrait, create_huggingface_engine, InMemoryEmbeddingEngine};
+use std::sync::Arc;
 use tracing::{info, Level};
 use tracing_subscriber;
 use shared::AwsS3Repository;
@@ -48,10 +48,10 @@ async fn main() -> Result<()> {
             info!("Using S3 storage for vectors with bucket: {}", bucket);
             let vector_s3_client = AwsS3Repository::new(access_key, secret_key, endpoint, region).await?;
             let vector_client = Box::new(vector_s3_client) as Box<dyn shared::S3ObjectStorageRepository>;
-            BedrockService::with_huggingface_and_s3_storage(hf_engine, vector_client, bucket)
+            BedrockService::with_huggingface_and_s3_storage(Arc::new(hf_engine), vector_client, bucket)
         } else {
             info!("Using in-memory storage for vectors");
-            BedrockService::with_huggingface_embeddings(hf_engine)
+            BedrockService::with_huggingface_embeddings(Arc::new(hf_engine))
         }
     } else if let (Ok(endpoint), Ok(region), Ok(access_key), Ok(secret_key), Ok(bucket)) = (
         std::env::var("S3_ENDPOINT"),
@@ -68,14 +68,15 @@ async fn main() -> Result<()> {
         let embedding_client = Box::new(embedding_s3_client) as Box<dyn shared::S3ObjectStorageRepository>;
         let vector_client = Box::new(vector_s3_client) as Box<dyn shared::S3ObjectStorageRepository>;
 
-        BedrockService::with_s3_storage(embedding_client, vector_client, bucket)
+        let s3_embedding_engine = Arc::new(InMemoryEmbeddingEngine::new());
+        BedrockService::with_s3_storage(s3_embedding_engine, vector_client, bucket)
     } else {
         info!("S3 environment variables not found, using in-memory Bedrock service with simulated embeddings");
         BedrockService::new()
     };
 
     let state = AppState {
-        bedrock_service: Arc::new(Mutex::new(bedrock_service)) as Arc<Mutex<dyn BedrockServiceTrait + Send>>,
+        bedrock_service: Arc::new(bedrock_service) as Arc<dyn BedrockServiceTrait + Send + Sync>,
     };
 
     let app = Router::new()

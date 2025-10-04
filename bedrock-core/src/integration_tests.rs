@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// Test the complete BedrockService integration
 #[tokio::test]
 async fn test_bedrock_service_full_workflow() {
-    let mut service = BedrockService::new();
+    let service = BedrockService::new();
 
     // 1. Test embedding creation
     let embedding_request = EmbeddingRequest {
@@ -73,7 +73,7 @@ async fn test_bedrock_service_full_workflow() {
 
 #[tokio::test]
 async fn test_bedrock_service_multiple_documents() {
-    let mut service = BedrockService::new();
+    let service = BedrockService::new();
 
     // Create multiple documents with different content
     let documents = vec![
@@ -144,19 +144,25 @@ async fn test_bedrock_service_multiple_documents() {
 #[tokio::test]
 async fn test_bedrock_service_different_similarity_metrics() {
     // Test with Cosine similarity (default)
-    let service_cosine = BedrockService::with_similarity_metric(SimilarityMetric::Cosine);
-    test_similarity_metric(service_cosine, "Cosine").await;
+    let service_cosine = BedrockService::new();
+    test_similarity_metric(service_cosine, SimilarityMetric::Cosine, "Cosine").await;
 
     // Test with Euclidean distance
-    let service_euclidean = BedrockService::with_similarity_metric(SimilarityMetric::Euclidean);
-    test_similarity_metric(service_euclidean, "Euclidean").await;
+    let service_euclidean = BedrockService::new();
+    test_similarity_metric(service_euclidean, SimilarityMetric::Euclidean, "Euclidean").await;
 
     // Test with Dot Product
-    let service_dot = BedrockService::with_similarity_metric(SimilarityMetric::DotProduct);
-    test_similarity_metric(service_dot, "DotProduct").await;
+    let service_dot = BedrockService::new();
+    test_similarity_metric(service_dot, SimilarityMetric::DotProduct, "DotProduct").await;
 }
 
-async fn test_similarity_metric(mut service: BedrockService, metric_name: &str) {
+async fn test_similarity_metric(service: BedrockService, similarity_metric: SimilarityMetric, metric_name: &str) {
+    // Create an index with the specified similarity metric
+    service.create_vector_index(
+        format!("test-index-{}", metric_name.to_lowercase()),
+        1536, // Standard embedding dimensions
+        similarity_metric,
+    ).await.expect("Failed to create index");
     // Create test documents
     let doc1 = CreateDocumentRequest {
         id: Some("similar1".to_string()),
@@ -327,7 +333,7 @@ async fn test_vector_store_trait_compliance() {
 
 #[tokio::test]
 async fn test_bedrock_service_error_handling() {
-    let mut service = BedrockService::new();
+    let service = BedrockService::new();
 
     // Test unsupported model
     let bad_request = EmbeddingRequest {
@@ -360,7 +366,7 @@ async fn test_bedrock_service_error_handling() {
 
 #[tokio::test]
 async fn test_bedrock_service_large_document_set() {
-    let mut service = BedrockService::new();
+    let service = BedrockService::new();
 
     // Create many documents
     for i in 0..50 {
@@ -417,7 +423,7 @@ async fn test_bedrock_service_large_document_set() {
 
 #[tokio::test]
 async fn test_concurrent_operations() {
-    let mut service = BedrockService::new();
+    let service = BedrockService::new();
 
     // Create multiple documents sequentially to simulate concurrent operations
     let mut tasks = Vec::new();
@@ -444,7 +450,7 @@ async fn test_concurrent_operations() {
 
 #[tokio::test]
 async fn test_edge_cases() {
-    let mut service = BedrockService::new();
+    let service = BedrockService::new();
 
     // Test very long content
     let long_content = "word ".repeat(1000);
