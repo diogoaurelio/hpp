@@ -4,10 +4,9 @@ use axum::{
     Router,
 };
 use bedrock_api::{handlers, AppState};
-use bedrock_core::{BedrockService, BedrockServiceTrait, create_huggingface_engine, InMemoryEmbeddingEngine};
+use bedrock_core::{BedrockService, BedrockServiceTrait, InMemoryEmbeddingEngine};
 use std::sync::Arc;
 use tracing::{info, Level};
-use tracing_subscriber;
 use shared::AwsS3Repository;
 
 #[tokio::main]
@@ -24,18 +23,21 @@ async fn main() -> Result<()> {
     let bedrock_service = if use_huggingface {
         info!("Initializing Bedrock service with HuggingFace embeddings");
 
-        // Load specified models or defaults
-        let models_to_load = std::env::var("HF_MODELS_TO_LOAD")
-            .unwrap_or_else(|_| "sentence-transformers/all-MiniLM-L6-v2".to_string())
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
+        let hf_engine = {
+            let cache_dir = std::env::var("HF_CACHE_DIR")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("hf_models"));
 
-        let cache_dir = std::env::var("HF_CACHE_DIR")
-            .ok()
-            .map(std::path::PathBuf::from);
-
-        let hf_engine = create_huggingface_engine(models_to_load, cache_dir).await?;
+            #[cfg(feature = "huggingface")]
+            {
+                InMemoryEmbeddingEngine::with_cache_dir(cache_dir)
+            }
+            #[cfg(not(feature = "huggingface"))]
+            {
+                InMemoryEmbeddingEngine::new()
+            }
+        };
 
         // Check if we should use S3 for vector storage
         if let (Ok(endpoint), Ok(region), Ok(access_key), Ok(secret_key), Ok(bucket)) = (
@@ -65,7 +67,7 @@ async fn main() -> Result<()> {
         let embedding_s3_client = AwsS3Repository::new(access_key.clone(), secret_key.clone(), endpoint.clone(), region.clone()).await?;
         let vector_s3_client = AwsS3Repository::new(access_key, secret_key, endpoint, region).await?;
 
-        let embedding_client = Box::new(embedding_s3_client) as Box<dyn shared::S3ObjectStorageRepository>;
+        let _embedding_client = Box::new(embedding_s3_client) as Box<dyn shared::S3ObjectStorageRepository>;
         let vector_client = Box::new(vector_s3_client) as Box<dyn shared::S3ObjectStorageRepository>;
 
         let s3_embedding_engine = Arc::new(InMemoryEmbeddingEngine::new());

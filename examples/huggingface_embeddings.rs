@@ -1,5 +1,6 @@
-use bedrock_core::{create_huggingface_engine, BedrockService, EmbeddingRequest, CreateDocumentRequest, SearchRequest};
+use bedrock_core::{BedrockService, InMemoryEmbeddingEngine, EmbeddingRequest, CreateDocumentRequest, SearchRequest};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -8,12 +9,18 @@ async fn main() -> anyhow::Result<()> {
 
     println!("🤗 Setting up HuggingFace Embedding Engine...");
 
-    // Create HuggingFace engine with MiniLM model
-    let models_to_load = vec!["sentence-transformers/all-MiniLM-L6-v2".to_string()];
-    let hf_engine = create_huggingface_engine(models_to_load, None).await?;
+    // Create embedding engine
+    #[cfg(feature = "huggingface")]
+    let hf_engine = {
+        let cache_dir = std::env::temp_dir().join("hf_models");
+        Arc::new(InMemoryEmbeddingEngine::with_cache_dir(cache_dir))
+    };
+
+    #[cfg(not(feature = "huggingface"))]
+    let hf_engine = Arc::new(InMemoryEmbeddingEngine::new());
 
     // Create Bedrock service with HuggingFace embeddings
-    let mut bedrock_service = BedrockService::with_huggingface_embeddings(hf_engine);
+    let bedrock_service = BedrockService::with_embedding_engine(hf_engine);
 
     println!("✅ HuggingFace engine initialized!");
 
