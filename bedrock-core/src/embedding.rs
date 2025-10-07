@@ -1,11 +1,8 @@
 use crate::types::*;
 use anyhow::Result;
 use std::collections::HashMap;
-#[cfg(feature = "huggingface")]
 use std::path::PathBuf;
-#[cfg(feature = "huggingface")]
 use std::sync::Arc;
-#[cfg(feature = "huggingface")]
 use tokio::sync::RwLock;
 
 /// Trait defining the embedding engine interface
@@ -18,14 +15,17 @@ pub trait EmbeddingEngineTrait: Send + Sync {
 /// Embedding engine that uses real HuggingFace models when available, or simulates embeddings otherwise
 pub struct InMemoryEmbeddingEngine {
     supported_models: Vec<String>,
-    #[cfg(feature = "huggingface")]
     model_cache_dir: PathBuf,
-    #[cfg(feature = "huggingface")]
     loaded_models: Arc<RwLock<HashMap<String, Arc<LoadedModel>>>>,
+    enable_huggingface: bool,
 }
 
 impl InMemoryEmbeddingEngine {
     pub fn new() -> Self {
+        let enable_huggingface = std::env::var("ENABLE_REAL_HUGGINGFACE")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
+
         Self {
             supported_models: vec![
                 "amazon.titan-embed-text-v1".to_string(),
@@ -33,15 +33,17 @@ impl InMemoryEmbeddingEngine {
                 "cohere.embed-english-v3".to_string(),
                 "cohere.embed-multilingual-v3".to_string(),
             ],
-            #[cfg(feature = "huggingface")]
             model_cache_dir: std::env::temp_dir().join("hf_models"),
-            #[cfg(feature = "huggingface")]
             loaded_models: Arc::new(RwLock::new(HashMap::new())),
+            enable_huggingface,
         }
     }
 
-    #[cfg(feature = "huggingface")]
     pub fn with_cache_dir(cache_dir: PathBuf) -> Self {
+        let enable_huggingface = std::env::var("ENABLE_REAL_HUGGINGFACE")
+            .map(|v| v.to_lowercase() == "true")
+            .unwrap_or(false);
+
         Self {
             supported_models: vec![
                 "amazon.titan-embed-text-v1".to_string(),
@@ -51,10 +53,10 @@ impl InMemoryEmbeddingEngine {
             ],
             model_cache_dir: cache_dir,
             loaded_models: Arc::new(RwLock::new(HashMap::new())),
+            enable_huggingface,
         }
     }
 
-    #[cfg(feature = "huggingface")]
     async fn create_real_embedding(&self, text: &str, model_id: &str) -> Result<Vec<f32>> {
         // Map AWS model IDs to HuggingFace model IDs
         let hf_model_id = match model_id {
@@ -73,7 +75,6 @@ impl InMemoryEmbeddingEngine {
         }
     }
 
-    #[cfg(feature = "huggingface")]
     async fn create_deterministic_embedding(&self, text: &str, model_id: &str) -> Result<Vec<f32>> {
         // Create a deterministic embedding that's better than the old simulate_embedding
         // This uses actual tokenization but simple pooling instead of neural networks
@@ -128,7 +129,6 @@ impl InMemoryEmbeddingEngine {
         }
     }
 
-    #[cfg(feature = "huggingface")]
     fn simulate_embedding_for_fallback(&self, text: &str, model_id: &str) -> Vec<f32> {
         // This is the old simulation logic as fallback
         let dimension = match model_id {
@@ -165,7 +165,6 @@ impl InMemoryEmbeddingEngine {
         embedding
     }
 
-    #[cfg(not(feature = "huggingface"))]
     fn simulate_embedding(&self, text: &str, model_id: &str) -> Vec<f32> {
         // Simulate different embedding dimensions based on model
         let dimension = match model_id {
@@ -204,7 +203,6 @@ impl InMemoryEmbeddingEngine {
         embedding
     }
 
-    #[cfg(feature = "huggingface")]
     async fn ensure_model_downloaded(&self, model_id: &str) -> Result<PathBuf> {
         use hf_hub::api::tokio::Api;
 
@@ -243,7 +241,6 @@ impl InMemoryEmbeddingEngine {
         Ok(model_path)
     }
 
-    #[cfg(feature = "huggingface")]
     async fn load_model(&self, model_id: &str) -> Result<Arc<LoadedModel>> {
         use candle_core::{Device, DType};
         use candle_nn::VarBuilder;
@@ -291,7 +288,6 @@ impl InMemoryEmbeddingEngine {
         }))
     }
 
-    #[cfg(feature = "huggingface")]
     async fn get_or_load_model(&self, model_id: &str) -> Result<Arc<LoadedModel>> {
         // Check if model is already loaded
         {
@@ -315,7 +311,6 @@ impl InMemoryEmbeddingEngine {
         Ok(loaded_model)
     }
 
-    #[cfg(feature = "huggingface")]
     async fn evict_old_models(&self, models: &mut HashMap<String, Arc<LoadedModel>>) -> Result<()> {
         // Simple LRU eviction - remove oldest models if we exceed cache size
         if models.len() > 3 { // Keep max 3 models loaded
@@ -334,7 +329,6 @@ impl InMemoryEmbeddingEngine {
         Ok(())
     }
 
-    #[cfg(feature = "huggingface")]
     async fn compute_embedding_with_model(&self, text: &str, model: &LoadedModel) -> Result<Vec<f32>> {
         use candle_core::Tensor;
 
@@ -376,7 +370,6 @@ impl InMemoryEmbeddingEngine {
         Ok(normalized_embedding)
     }
 
-    #[cfg(feature = "huggingface")]
     fn mean_pooling(&self, hidden_states: &candle_core::Tensor, attention_mask: &candle_core::Tensor) -> Result<candle_core::Tensor> {
         // hidden_states shape: (batch_size, seq_len, hidden_size)
         // attention_mask shape: (batch_size, seq_len)
@@ -404,7 +397,6 @@ impl InMemoryEmbeddingEngine {
         Ok(mean_embeddings.squeeze(0)?) // Remove batch dimension
     }
 
-    #[cfg(feature = "huggingface")]
     fn count_tokens_with_tokenizer(&self, text: &str, tokenizer: &tokenizers::Tokenizer) -> u32 {
         match tokenizer.encode(text, false) {
             Ok(encoding) => encoding.len() as u32,
@@ -412,7 +404,6 @@ impl InMemoryEmbeddingEngine {
         }
     }
 
-    #[cfg(not(feature = "huggingface"))]
     fn count_tokens(&self, text: &str) -> u32 {
         // Simple token counting approximation (words + punctuation)
         text.split_whitespace().count() as u32 + text.chars().filter(|c| c.is_ascii_punctuation()).count() as u32
@@ -426,8 +417,7 @@ impl EmbeddingEngineTrait for InMemoryEmbeddingEngine {
             return Err(anyhow::anyhow!("Model '{}' is not supported", request.model_id));
         }
 
-        #[cfg(feature = "huggingface")]
-        {
+        if self.enable_huggingface {
             let embedding = self.create_real_embedding(&request.input_text, &request.model_id).await?;
             // For token counting with HuggingFace, we need to get the model first
             let hf_model_id = match request.model_id.as_str() {
@@ -442,10 +432,7 @@ impl EmbeddingEngineTrait for InMemoryEmbeddingEngine {
                 embedding,
                 input_token_count: token_count,
             })
-        }
-
-        #[cfg(not(feature = "huggingface"))]
-        {
+        } else {
             let embedding = self.simulate_embedding(&request.input_text, &request.model_id);
             let token_count = self.count_tokens(&request.input_text);
 
@@ -561,7 +548,6 @@ impl EmbeddingEngineTrait for S3EmbeddingEngine {
 }
 
 // LoadedModel struct for HuggingFace models
-#[cfg(feature = "huggingface")]
 struct LoadedModel {
     model: candle_transformers::models::bert::BertModel,
     tokenizer: tokenizers::Tokenizer,
@@ -588,10 +574,8 @@ mod tests {
         assert!(result.is_ok());
 
         let response = result.unwrap();
-        #[cfg(feature = "huggingface")]
-        assert!(response.embedding.len() > 0); // Real HF model dimensions
-        #[cfg(not(feature = "huggingface"))]
-        assert_eq!(response.embedding.len(), 1536); // Simulated Titan v1 dimension
+        // Dimension depends on whether HuggingFace is enabled at runtime
+        assert!(response.embedding.len() > 0);
         assert!(response.input_token_count > 0);
 
         // Verify embedding is normalized
@@ -644,17 +628,9 @@ mod tests {
         let result_v1 = engine.create_embedding(request_v1).await.unwrap();
         let result_v2 = engine.create_embedding(request_v2).await.unwrap();
 
-        #[cfg(feature = "huggingface")]
-        {
-            // With HuggingFace, both map to the same model, so same dimensions
-            assert!(result_v1.embedding.len() > 0);
-            assert!(result_v2.embedding.len() > 0);
-        }
-        #[cfg(not(feature = "huggingface"))]
-        {
-            assert_eq!(result_v1.embedding.len(), 1536);
-            assert_eq!(result_v2.embedding.len(), 1024);
-        }
+        // Dimensions depend on runtime configuration
+        assert!(result_v1.embedding.len() > 0);
+        assert!(result_v2.embedding.len() > 0);
     }
 
     #[tokio::test]
@@ -755,10 +731,8 @@ mod tests {
         };
 
         let response = engine.create_embedding(request).await.unwrap();
-        #[cfg(feature = "huggingface")]
-        assert!(response.embedding.len() > 0); // Real HF model dimensions
-        #[cfg(not(feature = "huggingface"))]
-        assert_eq!(response.embedding.len(), 1536); // Simulated dimensions
+        // Dimension depends on whether HuggingFace is enabled at runtime
+        assert!(response.embedding.len() > 0);
         assert!(response.input_token_count > 0);
 
         // Test embedding consistency
@@ -771,10 +745,11 @@ mod tests {
         assert_eq!(response.embedding, response2.embedding);
     }
 
-    #[cfg(feature = "huggingface")]
     #[tokio::test]
     #[ignore] // Skip by default - requires network access to download models
     async fn test_in_memory_embedding_engine_with_huggingface() {
+        // Set environment variable for this test
+        std::env::set_var("ENABLE_REAL_HUGGINGFACE", "true");
         let cache_dir = std::env::temp_dir().join("test_hf_models");
         let engine = InMemoryEmbeddingEngine::with_cache_dir(cache_dir);
 

@@ -29,12 +29,14 @@ async fn main() -> Result<()> {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::env::temp_dir().join("hf_models"));
 
-            #[cfg(feature = "huggingface")]
-            {
+            // Use runtime environment variable instead of compile-time feature
+            let enable_real_hf = std::env::var("ENABLE_REAL_HUGGINGFACE")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false);
+
+            if enable_real_hf {
                 InMemoryEmbeddingEngine::with_cache_dir(cache_dir)
-            }
-            #[cfg(not(feature = "huggingface"))]
-            {
+            } else {
                 InMemoryEmbeddingEngine::new()
             }
         };
@@ -47,9 +49,9 @@ async fn main() -> Result<()> {
             std::env::var("S3_SECRET_KEY"),
             std::env::var("BEDROCK_S3_BUCKET")
         ) {
-            info!("Using S3 storage for vectors with bucket: {}", bucket);
-            let vector_s3_client = AwsS3Repository::new(access_key, secret_key, endpoint, region).await?;
-            let vector_client = Box::new(vector_s3_client) as Box<dyn shared::S3ObjectStorageRepository>;
+            info!("Using S3 storage for state persistency in bucket: {}", bucket);
+            let s3_storage_client = AwsS3Repository::new(access_key, secret_key, endpoint, region).await?;
+            let vector_client = Box::new(s3_storage_client) as Box<dyn shared::S3ObjectStorageRepository>;
             BedrockService::with_huggingface_and_s3_storage(Arc::new(hf_engine), vector_client, bucket)
         } else {
             info!("Using in-memory storage for vectors");

@@ -21,7 +21,7 @@ bedrock-core = { path = "../bedrock-core" }
 shared = { path = "../shared" }
 
 [features]
-huggingface = ["bedrock-core/huggingface"]
+# huggingface feature removed - now controlled at runtime via environment variables
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -4,7 +4,7 @@ use axum::{
     response::Json,
 };
 use bedrock_core::{
-    BedrockServiceTrait, EmbeddingRequest, CreateDocumentRequest, SearchRequest, SearchResponse,
+    EmbeddingRequest, CreateDocumentRequest, SearchRequest, SearchResponse,
     InvokeModelRequest, VectorDocument, TextEmbeddingRequest, TextEmbeddingResponse
 };
 use serde::Deserialize;

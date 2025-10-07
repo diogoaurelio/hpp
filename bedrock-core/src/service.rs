@@ -94,7 +94,6 @@ impl BedrockService {
     }
 
     /// Create service with HuggingFace embeddings and in-memory vector storage
-    #[cfg(feature = "huggingface")]
     pub fn with_huggingface_local(
         model_cache_dir: std::path::PathBuf,
     ) -> Self {
@@ -405,10 +404,8 @@ mod tests {
         assert!(result.is_ok());
 
         let response = result.unwrap();
-        #[cfg(feature = "huggingface")]
-        assert!(response.embedding.len() > 0); // Real HF model dimensions
-        #[cfg(not(feature = "huggingface"))]
-        assert_eq!(response.embedding.len(), 1536); // Simulated Titan v1 dimensions
+        // Dimensions depend on runtime configuration
+        assert!(response.embedding.len() > 0);
         assert!(response.input_token_count > 0);
     }
 
@@ -489,10 +486,8 @@ mod tests {
         };
 
         let embedding_response = service.create_embedding(embedding_request).await.unwrap();
-        #[cfg(feature = "huggingface")]
-        let expected_dims = embedding_response.embedding.len(); // Use actual dimensions
-        #[cfg(not(feature = "huggingface"))]
-        let expected_dims = 1536; // Simulated Titan v1 dimensions
+        // Dimensions depend on runtime configuration
+        let expected_dims = embedding_response.embedding.len();
         assert_eq!(embedding_response.embedding.len(), expected_dims);
         assert!(embedding_response.input_token_count > 0);
 

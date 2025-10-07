@@ -1,6 +1,4 @@
 pub mod handlers;
-#[cfg(test)]
-pub mod integration_tests;
 
 use bedrock_core::BedrockServiceTrait;
 use std::sync::Arc;

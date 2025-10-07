@@ -1,11 +1,7 @@
 use anyhow::Result;
-#[cfg(feature = "huggingface")]
 use std::collections::HashMap;
-#[cfg(feature = "huggingface")]
 use std::path::PathBuf;
-#[cfg(feature = "huggingface")]
 use std::sync::Arc;
-#[cfg(feature = "huggingface")]
 use tokio::sync::RwLock;
 
 /// Trait defining the text generation engine interface
@@ -38,10 +34,9 @@ pub struct TextGenerationResponse {
 /// Text generation engine that uses real HuggingFace models when available, or simulates text generation otherwise
 pub struct InMemoryTextGenerationEngine {
     supported_models: Vec<String>,
-    #[cfg(feature = "huggingface")]
     model_cache_dir: PathBuf,
-    #[cfg(feature = "huggingface")]
     loaded_models: Arc<RwLock<HashMap<String, Arc<LoadedTextModel>>>>,
+    enable_huggingface: bool,
 }
 
 impl InMemoryTextGenerationEngine {
@@ -58,14 +53,14 @@ impl InMemoryTextGenerationEngine {
                 "meta.llama2-13b-chat-v1".to_string(),
                 "meta.llama2-70b-chat-v1".to_string(),
             ],
-            #[cfg(feature = "huggingface")]
             model_cache_dir: std::env::temp_dir().join("hf_text_models"),
-            #[cfg(feature = "huggingface")]
             loaded_models: Arc::new(RwLock::new(HashMap::new())),
+            enable_huggingface: std::env::var("ENABLE_REAL_HUGGINGFACE")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false),
         }
     }
 
-    #[cfg(feature = "huggingface")]
     pub fn with_cache_dir(cache_dir: PathBuf) -> Self {
         Self {
             supported_models: vec![
@@ -81,10 +76,12 @@ impl InMemoryTextGenerationEngine {
             ],
             model_cache_dir: cache_dir,
             loaded_models: Arc::new(RwLock::new(HashMap::new())),
+            enable_huggingface: std::env::var("ENABLE_REAL_HUGGINGFACE")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false),
         }
     }
 
-    #[cfg(feature = "huggingface")]
     async fn generate_real_text(&self, request: &TextGenerationRequest) -> Result<TextGenerationResponse> {
         // Map AWS model IDs to HuggingFace model IDs
         let hf_model_id = match request.model_id.as_str() {
@@ -109,7 +106,6 @@ impl InMemoryTextGenerationEngine {
         }
     }
 
-    #[cfg(feature = "huggingface")]
     async fn generate_deterministic_text(&self, request: &TextGenerationRequest) -> Result<TextGenerationResponse> {
         // Generate a deterministic but more realistic response
         let base_responses = match request.model_id.as_str() {
@@ -162,7 +158,6 @@ impl InMemoryTextGenerationEngine {
         })
     }
 
-    #[cfg(feature = "huggingface")]
     fn hash_string(&self, s: &str) -> usize {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -172,7 +167,6 @@ impl InMemoryTextGenerationEngine {
         hasher.finish() as usize
     }
 
-    #[cfg(feature = "huggingface")]
     fn generate_continuation(&self, prompt: &str) -> String {
         // Simple continuation generation based on prompt keywords
         let prompt_lower = prompt.to_lowercase();
@@ -188,7 +182,6 @@ impl InMemoryTextGenerationEngine {
         }.to_string()
     }
 
-    #[cfg(not(feature = "huggingface"))]
     fn simulate_text_generation(&self, request: &TextGenerationRequest) -> TextGenerationResponse {
         // Simple deterministic text generation for testing
         let completion = match request.model_id.as_str() {
@@ -226,7 +219,6 @@ impl InMemoryTextGenerationEngine {
         }
     }
 
-    #[cfg(feature = "huggingface")]
     async fn ensure_text_model_downloaded(&self, model_id: &str) -> Result<PathBuf> {
         use hf_hub::api::tokio::Api;
 
@@ -267,14 +259,12 @@ impl InMemoryTextGenerationEngine {
         Ok(model_path)
     }
 
-    #[cfg(feature = "huggingface")]
     async fn load_text_model(&self, _model_id: &str) -> Result<Arc<LoadedTextModel>> {
         // For now, just return an error since we don't have proper GPT models in candle-transformers
         // This will fall back to the deterministic text generation
         Err(anyhow::anyhow!("Text generation models not yet implemented with HuggingFace. Using deterministic fallback."))
     }
 
-    #[cfg(feature = "huggingface")]
     async fn get_or_load_text_model(&self, model_id: &str) -> Result<Arc<LoadedTextModel>> {
         // Since we're not implementing actual models yet, just return an error
         // This will cause the system to fall back to deterministic generation
@@ -294,13 +284,9 @@ impl TextGenerationEngineTrait for InMemoryTextGenerationEngine {
             return Err(anyhow::anyhow!("Model '{}' is not supported", request.model_id));
         }
 
-        #[cfg(feature = "huggingface")]
-        {
+        if self.enable_huggingface {
             self.generate_real_text(&request).await
-        }
-
-        #[cfg(not(feature = "huggingface"))]
-        {
+        } else {
             Ok(self.simulate_text_generation(&request))
         }
     }
@@ -311,7 +297,6 @@ impl TextGenerationEngineTrait for InMemoryTextGenerationEngine {
 }
 
 // LoadedTextModel struct for HuggingFace models (placeholder for future implementation)
-#[cfg(feature = "huggingface")]
 struct LoadedTextModel {
     // Placeholder - actual implementation would contain the model, tokenizer, config, etc.
     last_used: std::time::Instant,
@@ -375,11 +360,8 @@ mod tests {
         let result1 = engine.generate_text(request.clone()).await.unwrap();
         let result2 = engine.generate_text(request).await.unwrap();
 
-        #[cfg(not(feature = "huggingface"))]
-        {
-            // Without HuggingFace, should be exactly the same
-            assert_eq!(result1.completion, result2.completion);
-        }
+        // Results should be deterministic regardless of HuggingFace setting
+        assert_eq!(result1.completion, result2.completion);
 
         // Both should have reasonable output
         assert!(!result1.completion.is_empty());
