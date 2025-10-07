@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     let hostname = std::env::var("INTERFACE").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8990".to_string());
+    let port = std::env::var("BEDROCK_PORT").unwrap_or_else(|_| "8990".to_string());
     let endpoint = format!("{hostname}:{port}");
     let listener = tokio::net::TcpListener::bind(&endpoint).await?;
     info!("Bedrock API server listening on {endpoint}");
