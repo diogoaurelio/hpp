@@ -189,6 +189,25 @@ BEDROCK_S3_BUCKET=bedrock-vectors  # S3 bucket for vector storage
 
 ### Running the Services
 
+On each terminal session make sure to source env vars:
+```shell
+set -a && source .env.example && set +a
+```
+If you'd like to test with production variables, create a dedicated `.env` file for it (git-ignored):
+```shell
+cp .env.example .env
+set -a && source .env && set +a
+```
+
+Next start supporting environment in docker. We use s3 compatible object storage via MinIO to store configs across runs, so that the 
+APIs may be restarted without state being lost.
+
+```shell
+# Start MinIO (S3-compatible storage) + all services
+docker compose up -d
+```
+
+Finally, start the available facade APIs:
 ```bash
 # Start IAM service (port 8988)
 cargo run --package iam-api
@@ -197,21 +216,6 @@ cargo run --package iam-api
 cargo run --package s3-api
 
 # Start Bedrock service (AWS Bedrock compatible)
-cargo run --package bedrock-api
-```
-
-### Running All Services with Docker
-```bash
-# Start MinIO (S3-compatible storage) + all services
-docker compose up -d
-
-# Copy environment configuration
-cp .env.example .env
-source .env
-
-# Run all services in parallel
-cargo run --package iam-api &
-cargo run --package s3-api &
 cargo run --package bedrock-api
 ```
 
@@ -277,6 +281,7 @@ Configure your AWS CLI profile with the extracted credentials:
 # Using the variables from Step 1
 aws configure set aws_access_key_id "$ACCESS_KEY" --profile hpp
 aws configure set aws_secret_access_key "$SECRET_KEY" --profile hpp
+# optionally
 aws configure set region eu-central-1 --profile hpp
 aws configure set output json --profile hpp
 
@@ -285,41 +290,8 @@ aws configure list --profile hpp
 ```
 
 **Complete automated setup script:**
-```bash
-#!/bin/bash
-# Complete HPP user setup script
 
-echo "Creating IAM user..."
-curl -s -X POST http://localhost:8988/ \
-  -H "Content-Type: application/json" \
-  -d '{"user_name": "hpp-user", "path": "/"}' | jq .
-
-echo "Creating access keys..."
-RESPONSE=$(curl -s -X POST http://localhost:8988/users/hpp-user/access-keys)
-ACCESS_KEY=$(echo "$RESPONSE" | jq -r '.CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.access_key_id')
-SECRET_KEY=$(echo "$RESPONSE" | jq -r '.CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.secret_access_key')
-
-echo "Generated credentials:"
-echo "Access Key: $ACCESS_KEY"
-echo "Secret Key: $SECRET_KEY"
-
-echo "Attaching S3FullAccess policy..."
-curl -s -X POST http://localhost:8988/users/hpp-user/attached-policies \
-  -H "Content-Type: application/json" \
-  -d '{"policy_arn": "arn:aws:iam::aws:policy/AmazonS3FullAccess"}' | jq .
-
-echo "Configuring AWS CLI profile..."
-aws configure set aws_access_key_id "$ACCESS_KEY" --profile hpp
-aws configure set aws_secret_access_key "$SECRET_KEY" --profile hpp
-aws configure set region eu-central-1 --profile hpp
-aws configure set output json --profile hpp
-
-echo "Setup complete! Test with:"
-echo "aws s3 ls --profile hpp --endpoint-url http://localhost:8989"
-```
-
-**Quick setup script:**
-Use the provided setup script:
+Alternatively use the provided setup script:
 ```bash
 ./bin/setup-hpp-user.sh
 ```
@@ -398,25 +370,25 @@ Access MinIO console at: http://localhost:9001
 ### AWS CLI Testing with MinIO
 ```bash
 # Configure AWS CLI profile for MinIO
-aws configure set aws_access_key_id admin --profile hpp-test
-aws configure set aws_secret_access_key admin123 --profile hpp-test
-aws configure set region us-east-1 --profile hpp-test
-aws configure set output json --profile hpp-test
+aws configure set aws_access_key_id admin --profile hpp
+aws configure set aws_secret_access_key admin123 --profile hpp
+aws configure set region us-east-1 --profile hpp
+aws configure set output json --profile hpp
 
 # Test direct MinIO connection
-aws s3 ls --profile hpp-test --endpoint-url http://localhost:9000
+aws s3 ls --profile hpp --endpoint-url http://localhost:9000
 
 # Test through your S3 API proxy
-aws s3 ls --profile hpp-test --endpoint-url http://localhost:8989
+aws s3 ls --profile hpp --endpoint-url http://localhost:8989
 
 # Create and test with buckets
-aws s3 mb s3://my-test-bucket --profile hpp-test --endpoint-url http://localhost:9000
-aws s3 ls --profile hpp-test --endpoint-url http://localhost:8989
+aws s3 mb s3://my-test-bucket --profile hpp --endpoint-url http://localhost:9000
+aws s3 ls --profile hpp --endpoint-url http://localhost:8989
 
 # Upload and download files
 echo "Hello World" > test.txt
-aws s3 cp test.txt s3://test-bucket/test.txt --profile hpp-test --endpoint-url http://localhost:9000
-aws s3 cp s3://test-bucket/test.txt downloaded.txt --profile hpp-test --endpoint-url http://localhost:8989
+aws s3 cp test.txt s3://test-bucket/test.txt --profile hpp --endpoint-url http://localhost:9000
+aws s3 cp s3://test-bucket/test.txt downloaded.txt --profile hpp --endpoint-url http://localhost:8989
 ```
 
 ### curl Testing
@@ -679,22 +651,36 @@ cargo run --package bedrock-api  # Runs on http://127.0.0.1:8990
 # Test text generation with Claude v2
 cat > claude-prompt.json << 'EOF'
 {
-    "prompt": "What are the benefits of renewable energy?",
-    "maxTokens": 100,
+    "anthropic_version": "bedrock-2023-05-31",
+    "max_tokens": 100,
+    "messages": [
+        {
+            "role": "user",
+            "content": "What are the benefits of renewable energy?"
+        }
+    ],
     "temperature": 0.7
 }
 EOF
 
 aws bedrock-runtime invoke-model \
-    --profile bedrock-local \
-    --endpoint-url http://127.0.0.1:8990 \
-    --model-id anthropic.claude-v2 \
-    --content-type application/json \
-    --accept application/json \
-    --body file://claude-prompt.json \
-    claude-response.json
+      --profile hpp \
+      --endpoint-url http://127.0.0.1:8990 \
+      --model-id anthropic.claude-v2 \
+      --content-type application/json \
+      --accept application/json \
+      --body "$(base64 -w 0 claude-prompt.json)" \
+      claude-response.json | jq
 
 cat claude-response.json | jq .
+
+# JSON Parameters for Claude models:
+# - anthropic_version: "bedrock-2023-05-31" (required for Claude)
+# - max_tokens: Maximum tokens to generate (1-4096)
+# - messages: Array of conversation messages with role/content
+# - temperature: Randomness (0.0=deterministic, 1.0=creative, default 0.7)
+# - top_p: Nucleus sampling (0.0-1.0, alternative to temperature)
+# - stop_sequences: Array of strings that stop generation
 ```
 
 **Expected Response:**
@@ -796,7 +782,7 @@ cargo test -- --ignored
 ```bash
 # For HuggingFace integration tests (requires internet)
 export USE_HUGGINGFACE_EMBEDDINGS=true
-export HF_CACHE_DIR=./test_cache
+export HF_CACHE_DIR=/tmp/test_cache
 
 # For S3 backend tests
 export AWS_ACCESS_KEY_ID=test
