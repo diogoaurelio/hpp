@@ -17,3 +17,5 @@ shared = { path = "../shared" }
 mockall = { version = "0.12", optional = true }
 bytes = "1.0"
 async-trait = "0.1"
+cedar-policy = "4.7.0"
+log = "0.4"

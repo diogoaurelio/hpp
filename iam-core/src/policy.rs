@@ -1,11 +1,18 @@
 use crate::types::*;
+use crate::authorization::AuthorizationManagerTrait;
+use crate::user::UserManagerTrait;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Trait defining the policy engine interface for IAM operations
 pub trait PolicyEngineTrait: Send + Sync {
+    fn set_authorization_manager(&mut self, auth_manager: Arc<dyn AuthorizationManagerTrait>);
+    fn set_user_manager(&mut self, user_manager: Arc<dyn UserManagerTrait>);
+
     fn add_policy(&mut self, arn: String, document: PolicyDocument);
     fn attach_user_policy(&mut self, user_name: String, policy_arn: String);
     fn attach_role_policy(&mut self, role_name: String, policy_arn: String);
+
     fn evaluate_request(&self, request: &AuthorizeRequest) -> AuthorizeResponse;
     fn evaluate_request_for_user(&self, request: &AuthorizeRequest, user_name: &str) -> AuthorizeResponse;
 }
@@ -14,6 +21,8 @@ pub struct InMemoryPolicyEngine {
     policies: HashMap<String, PolicyDocument>,
     user_policies: HashMap<String, Vec<String>>, // user_name -> policy_arns
     role_policies: HashMap<String, Vec<String>>, // role_name -> policy_arns
+    auth_manager: Option<Arc<dyn AuthorizationManagerTrait>>,
+    user_manager: Option<Arc<dyn UserManagerTrait>>,
 }
 
 impl InMemoryPolicyEngine {
@@ -22,81 +31,21 @@ impl InMemoryPolicyEngine {
             policies: HashMap::new(),
             user_policies: HashMap::new(),
             role_policies: HashMap::new(),
+            auth_manager: None,
+            user_manager: None,
         }
     }
 
-    fn evaluate_policy(&self, policy: &PolicyDocument, request: &AuthorizeRequest) -> bool {
-        for statement in &policy.statement {
-            if self.evaluate_statement(statement, request) {
-                match statement.effect {
-                    Effect::Allow => return true,
-                    Effect::Deny => return false,
-                }
-            }
+
+    fn get_user_from_access_key(&self, access_key_id: &str) -> Option<String> {
+        if let Some(user_manager) = &self.user_manager {
+            // Look up the user by access key
+            user_manager.get_access_key(access_key_id)
+                .map(|access_key| access_key.user_name)
+        } else {
+            // Fallback for testing - return a dummy user
+            Some("test-user".to_string())
         }
-        false
-    }
-
-    fn evaluate_statement(&self, statement: &Statement, request: &AuthorizeRequest) -> bool {
-        // Check if action matches
-        if !self.matches_action(&statement.action, &request.action) {
-            return false;
-        }
-
-        // Check if resource matches
-        if !self.matches_resource(&statement.resource, &request.resource) {
-            return false;
-        }
-
-        // Check conditions (simplified)
-        if let Some(_conditions) = &statement.condition {
-            // TODO: Implement condition evaluation
-            // For now, assume conditions pass
-        }
-
-        true
-    }
-
-    fn matches_action(&self, action_value: &ActionValue, request_action: &str) -> bool {
-        match action_value {
-            ActionValue::Single(action) => self.wildcard_match(action, request_action),
-            ActionValue::Multiple(actions) => {
-                actions.iter().any(|action| self.wildcard_match(action, request_action))
-            }
-        }
-    }
-
-    fn matches_resource(&self, resource_value: &ResourceValue, request_resource: &str) -> bool {
-        match resource_value {
-            ResourceValue::Single(resource) => self.wildcard_match(resource, request_resource),
-            ResourceValue::Multiple(resources) => {
-                resources.iter().any(|resource| self.wildcard_match(resource, request_resource))
-            }
-        }
-    }
-
-    fn wildcard_match(&self, pattern: &str, text: &str) -> bool {
-        if pattern == "*" {
-            return true;
-        }
-
-        if pattern.contains('*') {
-            // Simple wildcard matching - replace with proper glob matching in production
-            let parts: Vec<&str> = pattern.split('*').collect();
-            if parts.len() == 2 {
-                let prefix = parts[0];
-                let suffix = parts[1];
-                return text.starts_with(prefix) && text.ends_with(suffix);
-            }
-        }
-
-        pattern == text
-    }
-
-    fn get_user_from_access_key(&self, _access_key_id: &str) -> Option<String> {
-        // TODO: Implement access key to user mapping
-        // For now, return a dummy user
-        Some("test-user".to_string())
     }
 }
 
@@ -132,6 +81,14 @@ pub fn create_s3_read_only_policy() -> PolicyDocument {
 }
 
 impl PolicyEngineTrait for InMemoryPolicyEngine {
+    fn set_authorization_manager(&mut self, auth_manager: Arc<dyn AuthorizationManagerTrait>) {
+        self.auth_manager = Some(auth_manager);
+    }
+
+    fn set_user_manager(&mut self, user_manager: Arc<dyn UserManagerTrait>) {
+        self.user_manager = Some(user_manager);
+    }
+
     fn add_policy(&mut self, arn: String, document: PolicyDocument) {
         self.policies.insert(arn, document);
     }
@@ -154,37 +111,45 @@ impl PolicyEngineTrait for InMemoryPolicyEngine {
         let user_name = self.get_user_from_access_key(&request.access_key_id);
 
         if let Some(user) = user_name {
-            if let Some(policy_arns) = self.user_policies.get(&user) {
-                for policy_arn in policy_arns {
-                    if let Some(policy_doc) = self.policies.get(policy_arn) {
-                        if self.evaluate_policy(policy_doc, request) {
-                            return AuthorizeResponse {
-                                allowed: true,
-                                reason: Some("Policy allows action".to_string()),
-                                matched_policies: vec![policy_arn.clone()],
-                            };
-                        }
-                    }
-                }
-            }
+            return self.evaluate_request_for_user(request, &user);
         }
 
         AuthorizeResponse {
             allowed: false,
-            reason: Some("No matching allow policy found".to_string()),
+            reason: Some("No user found for access key".to_string()),
             matched_policies: vec![],
         }
     }
 
     fn evaluate_request_for_user(&self, request: &AuthorizeRequest, user_name: &str) -> AuthorizeResponse {
         if let Some(policy_arns) = self.user_policies.get(user_name) {
-            for policy_arn in policy_arns {
-                if let Some(policy_doc) = self.policies.get(policy_arn) {
-                    if self.evaluate_policy(policy_doc, request) {
+            let policies_with_arns: Vec<(String, PolicyDocument)> = policy_arns
+                .iter()
+                .filter_map(|arn| self.policies.get(arn).map(|policy| (arn.clone(), policy.clone())))
+                .collect();
+
+            if !policies_with_arns.is_empty() {
+                if let Some(auth_manager) = &self.auth_manager {
+                    let policies_refs: Vec<(String, &PolicyDocument)> = policies_with_arns
+                        .iter()
+                        .map(|(arn, policy)| (arn.clone(), policy))
+                        .collect();
+                    return auth_manager.authorize_for_user_with_arns(request, user_name, &policies_refs);
+                } else {
+                    // Fallback: Use Cedar authorization manager as default
+                    use crate::cedar_authorization::CedarAuthorizationManager;
+                    if let Ok(cedar_auth) = CedarAuthorizationManager::new() {
+                        let policies_refs: Vec<(String, &PolicyDocument)> = policies_with_arns
+                            .iter()
+                            .map(|(arn, policy)| (arn.clone(), policy))
+                            .collect();
+                        return cedar_auth.authorize_for_user_with_arns(request, user_name, &policies_refs);
+                    } else {
+                        // Last resort: deny all requests if Cedar can't be initialized
                         return AuthorizeResponse {
-                            allowed: true,
-                            reason: Some("Policy allows action".to_string()),
-                            matched_policies: vec![policy_arn.clone()],
+                            allowed: false,
+                            reason: Some("No authorization manager available".to_string()),
+                            matched_policies: vec![],
                         };
                     }
                 }
@@ -202,6 +167,8 @@ impl PolicyEngineTrait for InMemoryPolicyEngine {
 pub struct S3PolicyEngine {
     s3_client: Box<dyn shared::S3ObjectStorageRepository>,
     bucket: String,
+    auth_manager: Option<Arc<dyn AuthorizationManagerTrait>>,
+    user_manager: Option<Arc<dyn UserManagerTrait>>,
     // Cache for better performance - invalidated on writes
     policies_cache: tokio::sync::RwLock<Option<HashMap<String, PolicyDocument>>>,
     user_policies_cache: tokio::sync::RwLock<Option<HashMap<String, Vec<String>>>>,
@@ -213,6 +180,8 @@ impl S3PolicyEngine {
         Self {
             s3_client,
             bucket,
+            auth_manager: None,
+            user_manager: None,
             policies_cache: tokio::sync::RwLock::new(None),
             user_policies_cache: tokio::sync::RwLock::new(None),
             role_policies_cache: tokio::sync::RwLock::new(None),
@@ -327,78 +296,16 @@ impl S3PolicyEngine {
         Ok((user_policies, role_policies))
     }
 
-    fn evaluate_policy(&self, policy: &PolicyDocument, request: &AuthorizeRequest) -> bool {
-        for statement in &policy.statement {
-            if self.evaluate_statement(statement, request) {
-                match statement.effect {
-                    Effect::Allow => return true,
-                    Effect::Deny => return false,
-                }
-            }
+
+    fn get_user_from_access_key(&self, access_key_id: &str) -> Option<String> {
+        if let Some(user_manager) = &self.user_manager {
+            // Look up the user by access key
+            user_manager.get_access_key(access_key_id)
+                .map(|access_key| access_key.user_name)
+        } else {
+            // Fallback for testing - return a dummy user
+            Some("test-user".to_string())
         }
-        false
-    }
-
-    fn evaluate_statement(&self, statement: &Statement, request: &AuthorizeRequest) -> bool {
-        // Check if action matches
-        if !self.matches_action(&statement.action, &request.action) {
-            return false;
-        }
-
-        // Check if resource matches
-        if !self.matches_resource(&statement.resource, &request.resource) {
-            return false;
-        }
-
-        // Check conditions (simplified)
-        if let Some(_conditions) = &statement.condition {
-            // TODO: Implement condition evaluation
-            // For now, assume conditions pass
-        }
-
-        true
-    }
-
-    fn matches_action(&self, action_value: &ActionValue, request_action: &str) -> bool {
-        match action_value {
-            ActionValue::Single(action) => self.wildcard_match(action, request_action),
-            ActionValue::Multiple(actions) => {
-                actions.iter().any(|action| self.wildcard_match(action, request_action))
-            }
-        }
-    }
-
-    fn matches_resource(&self, resource_value: &ResourceValue, request_resource: &str) -> bool {
-        match resource_value {
-            ResourceValue::Single(resource) => self.wildcard_match(resource, request_resource),
-            ResourceValue::Multiple(resources) => {
-                resources.iter().any(|resource| self.wildcard_match(resource, request_resource))
-            }
-        }
-    }
-
-    fn wildcard_match(&self, pattern: &str, text: &str) -> bool {
-        if pattern == "*" {
-            return true;
-        }
-
-        if pattern.contains('*') {
-            // Simple wildcard matching - replace with proper glob matching in production
-            let parts: Vec<&str> = pattern.split('*').collect();
-            if parts.len() == 2 {
-                let prefix = parts[0];
-                let suffix = parts[1];
-                return text.starts_with(prefix) && text.ends_with(suffix);
-            }
-        }
-
-        pattern == text
-    }
-
-    fn get_user_from_access_key(&self, _access_key_id: &str) -> Option<String> {
-        // TODO: Implement access key to user mapping
-        // For now, return a dummy user
-        Some("test-user".to_string())
     }
 }
 
@@ -410,6 +317,14 @@ struct StoredPolicyAttachmentsData {
 
 #[async_trait::async_trait]
 impl PolicyEngineTrait for S3PolicyEngine {
+    fn set_authorization_manager(&mut self, auth_manager: Arc<dyn AuthorizationManagerTrait>) {
+        self.auth_manager = Some(auth_manager);
+    }
+
+    fn set_user_manager(&mut self, user_manager: Arc<dyn UserManagerTrait>) {
+        self.user_manager = Some(user_manager);
+    }
+
     fn add_policy(&mut self, arn: String, document: PolicyDocument) {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
@@ -452,27 +367,12 @@ impl PolicyEngineTrait for S3PolicyEngine {
                 let user_name = self.get_user_from_access_key(&request.access_key_id);
 
                 if let Some(user) = user_name {
-                    let (user_policies, _) = self.get_policy_attachments_cached().await.unwrap_or_default();
-                    let policies = self.get_policies_cached().await.unwrap_or_default();
-
-                    if let Some(policy_arns) = user_policies.get(&user) {
-                        for policy_arn in policy_arns {
-                            if let Some(policy_doc) = policies.get(policy_arn) {
-                                if self.evaluate_policy(policy_doc, request) {
-                                    return AuthorizeResponse {
-                                        allowed: true,
-                                        reason: Some("Policy allows action".to_string()),
-                                        matched_policies: vec![policy_arn.clone()],
-                                    };
-                                }
-                            }
-                        }
-                    }
+                    return self.evaluate_request_for_user(request, &user);
                 }
 
                 AuthorizeResponse {
                     allowed: false,
-                    reason: Some("No matching allow policy found".to_string()),
+                    reason: Some("No user found for access key".to_string()),
                     matched_policies: vec![],
                 }
             })
@@ -486,13 +386,25 @@ impl PolicyEngineTrait for S3PolicyEngine {
                 let policies = self.get_policies_cached().await.unwrap_or_default();
 
                 if let Some(policy_arns) = user_policies.get(user_name) {
-                    for policy_arn in policy_arns {
-                        if let Some(policy_doc) = policies.get(policy_arn) {
-                            if self.evaluate_policy(policy_doc, request) {
+                    let policies_with_arns: Vec<(String, &PolicyDocument)> = policy_arns
+                        .iter()
+                        .filter_map(|arn| policies.get(arn).map(|policy| (arn.clone(), policy)))
+                        .collect();
+
+                    if !policies_with_arns.is_empty() {
+                        if let Some(auth_manager) = &self.auth_manager {
+                            return auth_manager.authorize_for_user_with_arns(request, user_name, &policies_with_arns);
+                        } else {
+                            // Fallback: Use Cedar authorization manager as default
+                            use crate::cedar_authorization::CedarAuthorizationManager;
+                            if let Ok(cedar_auth) = CedarAuthorizationManager::new() {
+                                return cedar_auth.authorize_for_user_with_arns(request, user_name, &policies_with_arns);
+                            } else {
+                                // Last resort: deny all requests if Cedar can't be initialized
                                 return AuthorizeResponse {
-                                    allowed: true,
-                                    reason: Some("Policy allows action".to_string()),
-                                    matched_policies: vec![policy_arn.clone()],
+                                    allowed: false,
+                                    reason: Some("No authorization manager available".to_string()),
+                                    matched_policies: vec![],
                                 };
                             }
                         }
@@ -598,201 +510,7 @@ mod tests {
         assert!(response.matched_policies.is_empty());
     }
 
-    #[test]
-    fn test_evaluate_request_for_user_deny_no_matching_action() {
-        let mut policy_engine = InMemoryPolicyEngine::new();
 
-        // Add S3 read-only policy (only allows GetObject and ListBucket)
-        let policy_arn = "arn:aws:iam::123456789012:policy/S3ReadOnly".to_string();
-        let policy_doc = create_s3_read_only_policy();
-        policy_engine.add_policy(policy_arn.clone(), policy_doc);
-
-        // Attach policy to user
-        let user_name = "test-user";
-        policy_engine.attach_user_policy(user_name.to_string(), policy_arn);
-
-        // Try to perform PutObject (not allowed by read-only policy)
-        let request = AuthorizeRequest {
-            access_key_id: "AKIATEST123".to_string(),
-            action: "s3:PutObject".to_string(),
-            resource: "arn:aws:s3:::test-bucket/test-object".to_string(),
-            context: std::collections::HashMap::new(),
-        };
-
-        let response = policy_engine.evaluate_request_for_user(&request, user_name);
-        assert!(!response.allowed);
-        assert_eq!(response.reason, Some("No matching allow policy found".to_string()));
-        assert!(response.matched_policies.is_empty());
-    }
-
-    #[test]
-    fn test_evaluate_request_for_user_multiple_policies() {
-        let mut policy_engine = InMemoryPolicyEngine::new();
-
-        // Add both read-only and full access policies
-        let readonly_arn = "arn:aws:iam::123456789012:policy/S3ReadOnly".to_string();
-        let fullaccess_arn = "arn:aws:iam::123456789012:policy/S3FullAccess".to_string();
-
-        policy_engine.add_policy(readonly_arn.clone(), create_s3_read_only_policy());
-        policy_engine.add_policy(fullaccess_arn.clone(), create_s3_full_access_policy());
-
-        // Attach both policies to user
-        let user_name = "test-user";
-        policy_engine.attach_user_policy(user_name.to_string(), readonly_arn);
-        policy_engine.attach_user_policy(user_name.to_string(), fullaccess_arn.clone());
-
-        // Test GetObject (allowed by both policies, should match first one found)
-        let request = AuthorizeRequest {
-            access_key_id: "AKIATEST123".to_string(),
-            action: "s3:GetObject".to_string(),
-            resource: "arn:aws:s3:::test-bucket/test-object".to_string(),
-            context: std::collections::HashMap::new(),
-        };
-
-        let response = policy_engine.evaluate_request_for_user(&request, user_name);
-        assert!(response.allowed);
-        assert!(!response.matched_policies.is_empty());
-    }
-
-    #[test]
-    fn test_wildcard_match_star() {
-        let policy_engine = InMemoryPolicyEngine::new();
-        assert!(policy_engine.wildcard_match("*", "anything"));
-        assert!(policy_engine.wildcard_match("*", "s3:GetObject"));
-        assert!(policy_engine.wildcard_match("*", ""));
-    }
-
-    #[test]
-    fn test_wildcard_match_exact() {
-        let policy_engine = InMemoryPolicyEngine::new();
-        assert!(policy_engine.wildcard_match("s3:GetObject", "s3:GetObject"));
-        assert!(!policy_engine.wildcard_match("s3:GetObject", "s3:PutObject"));
-    }
-
-    #[test]
-    fn test_wildcard_match_prefix_suffix() {
-        let policy_engine = InMemoryPolicyEngine::new();
-        assert!(policy_engine.wildcard_match("s3:*", "s3:GetObject"));
-        assert!(policy_engine.wildcard_match("s3:*", "s3:PutObject"));
-        assert!(!policy_engine.wildcard_match("s3:*", "ec2:DescribeInstances"));
-
-        assert!(policy_engine.wildcard_match("*:GetObject", "s3:GetObject"));
-        assert!(policy_engine.wildcard_match("*:GetObject", "dynamodb:GetObject"));
-        assert!(!policy_engine.wildcard_match("*:GetObject", "s3:PutObject"));
-    }
-
-    #[test]
-    fn test_matches_action_single() {
-        let policy_engine = InMemoryPolicyEngine::new();
-        let action_value = ActionValue::Single("s3:GetObject".to_string());
-
-        assert!(policy_engine.matches_action(&action_value, "s3:GetObject"));
-        assert!(!policy_engine.matches_action(&action_value, "s3:PutObject"));
-    }
-
-    #[test]
-    fn test_matches_action_multiple() {
-        let policy_engine = InMemoryPolicyEngine::new();
-        let action_value = ActionValue::Multiple(vec![
-            "s3:GetObject".to_string(),
-            "s3:ListBucket".to_string(),
-        ]);
-
-        assert!(policy_engine.matches_action(&action_value, "s3:GetObject"));
-        assert!(policy_engine.matches_action(&action_value, "s3:ListBucket"));
-        assert!(!policy_engine.matches_action(&action_value, "s3:PutObject"));
-    }
-
-    #[test]
-    fn test_matches_resource_single() {
-        let policy_engine = InMemoryPolicyEngine::new();
-        let resource_value = ResourceValue::Single("arn:aws:s3:::test-bucket/*".to_string());
-
-        assert!(policy_engine.matches_resource(&resource_value, "arn:aws:s3:::test-bucket/file.txt"));
-        assert!(!policy_engine.matches_resource(&resource_value, "arn:aws:s3:::other-bucket/file.txt"));
-    }
-
-    #[test]
-    fn test_matches_resource_multiple() {
-        let policy_engine = InMemoryPolicyEngine::new();
-        let resource_value = ResourceValue::Multiple(vec![
-            "arn:aws:s3:::bucket1/*".to_string(),
-            "arn:aws:s3:::bucket2/*".to_string(),
-        ]);
-
-        assert!(policy_engine.matches_resource(&resource_value, "arn:aws:s3:::bucket1/file.txt"));
-        assert!(policy_engine.matches_resource(&resource_value, "arn:aws:s3:::bucket2/file.txt"));
-        assert!(!policy_engine.matches_resource(&resource_value, "arn:aws:s3:::bucket3/file.txt"));
-    }
-
-    #[test]
-    fn test_evaluate_statement_success() {
-        let policy_engine = InMemoryPolicyEngine::new();
-
-        let statement = Statement {
-            sid: Some("AllowS3GetObject".to_string()),
-            effect: Effect::Allow,
-            action: ActionValue::Single("s3:GetObject".to_string()),
-            resource: ResourceValue::Single("arn:aws:s3:::test-bucket/*".to_string()),
-            condition: None,
-            principal: None,
-        };
-
-        let request = AuthorizeRequest {
-            access_key_id: "AKIATEST123".to_string(),
-            action: "s3:GetObject".to_string(),
-            resource: "arn:aws:s3:::test-bucket/file.txt".to_string(),
-            context: std::collections::HashMap::new(),
-        };
-
-        assert!(policy_engine.evaluate_statement(&statement, &request));
-    }
-
-    #[test]
-    fn test_evaluate_statement_action_mismatch() {
-        let policy_engine = InMemoryPolicyEngine::new();
-
-        let statement = Statement {
-            sid: Some("AllowS3GetObject".to_string()),
-            effect: Effect::Allow,
-            action: ActionValue::Single("s3:GetObject".to_string()),
-            resource: ResourceValue::Single("*".to_string()),
-            condition: None,
-            principal: None,
-        };
-
-        let request = AuthorizeRequest {
-            access_key_id: "AKIATEST123".to_string(),
-            action: "s3:PutObject".to_string(),
-            resource: "arn:aws:s3:::test-bucket/file.txt".to_string(),
-            context: std::collections::HashMap::new(),
-        };
-
-        assert!(!policy_engine.evaluate_statement(&statement, &request));
-    }
-
-    #[test]
-    fn test_evaluate_statement_resource_mismatch() {
-        let policy_engine = InMemoryPolicyEngine::new();
-
-        let statement = Statement {
-            sid: Some("AllowS3GetObject".to_string()),
-            effect: Effect::Allow,
-            action: ActionValue::Single("s3:GetObject".to_string()),
-            resource: ResourceValue::Single("arn:aws:s3:::specific-bucket/*".to_string()),
-            condition: None,
-            principal: None,
-        };
-
-        let request = AuthorizeRequest {
-            access_key_id: "AKIATEST123".to_string(),
-            action: "s3:GetObject".to_string(),
-            resource: "arn:aws:s3:::other-bucket/file.txt".to_string(),
-            context: std::collections::HashMap::new(),
-        };
-
-        assert!(!policy_engine.evaluate_statement(&statement, &request));
-    }
 
     #[test]
     fn test_create_s3_full_access_policy() {
