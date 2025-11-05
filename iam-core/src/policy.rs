@@ -49,37 +49,6 @@ impl InMemoryPolicyEngine {
     }
 }
 
-pub fn create_s3_full_access_policy() -> PolicyDocument {
-    PolicyDocument {
-        version: "2012-10-17".to_string(),
-        statement: vec![Statement {
-            sid: Some("S3FullAccess".to_string()),
-            effect: Effect::Allow,
-            action: ActionValue::Single("s3:*".to_string()),
-            resource: ResourceValue::Single("*".to_string()),
-            condition: None,
-            principal: None,
-        }],
-    }
-}
-
-pub fn create_s3_read_only_policy() -> PolicyDocument {
-    PolicyDocument {
-        version: "2012-10-17".to_string(),
-        statement: vec![Statement {
-            sid: Some("S3ReadOnly".to_string()),
-            effect: Effect::Allow,
-            action: ActionValue::Multiple(vec![
-                "s3:GetObject".to_string(),
-                "s3:ListBucket".to_string(),
-            ]),
-            resource: ResourceValue::Single("*".to_string()),
-            condition: None,
-            principal: None,
-        }],
-    }
-}
-
 impl PolicyEngineTrait for InMemoryPolicyEngine {
     fn set_authorization_manager(&mut self, auth_manager: Arc<dyn AuthorizationManagerTrait>) {
         self.auth_manager = Some(auth_manager);
@@ -427,6 +396,38 @@ mod tests {
     #[cfg(feature = "testing")]
     use shared::MockS3ObjectStorageRepository;
 
+    fn create_s3_full_access_policy() -> PolicyDocument {
+        PolicyDocument {
+            version: "2012-10-17".to_string(),
+            statement: vec![Statement {
+                sid: Some("S3FullAccess".to_string()),
+                effect: Effect::Allow,
+                action: ActionValue::Single("s3:*".to_string()),
+                resource: ResourceValue::Single("*".to_string()),
+                condition: None,
+                principal: None,
+            }],
+        }
+    }
+
+    fn create_s3_read_only_policy() -> PolicyDocument {
+        PolicyDocument {
+            version: "2012-10-17".to_string(),
+            statement: vec![Statement {
+                sid: Some("S3ReadOnly".to_string()),
+                effect: Effect::Allow,
+                action: ActionValue::Multiple(vec![
+                    "s3:GetObject".to_string(),
+                    "s3:ListBucket".to_string(),
+                ]),
+                resource: ResourceValue::Single("*".to_string()),
+                condition: None,
+                principal: None,
+            }],
+        }
+    }
+
+
     #[test]
     fn test_add_policy() {
         let mut policy_engine = InMemoryPolicyEngine::new();
@@ -568,4 +569,38 @@ mod tests {
     }
 
     // TODO: Add S3PolicyEngine integration tests (requires async mock setup)
+}
+
+/// Creates the AWS managed S3FullAccess policy
+pub fn create_s3_full_access_policy() -> PolicyDocument {
+    PolicyDocument {
+        version: "2012-10-17".to_string(),
+        statement: vec![Statement {
+            sid: Some("S3FullAccess".to_string()),
+            effect: Effect::Allow,
+            action: ActionValue::Single("s3:*".to_string()),
+            resource: ResourceValue::Single("*".to_string()),
+            condition: None,
+            principal: None,
+        }],
+    }
+}
+
+/// Creates the AWS managed S3ReadOnlyAccess policy
+pub fn create_s3_read_only_policy() -> PolicyDocument {
+    PolicyDocument {
+        version: "2012-10-17".to_string(),
+        statement: vec![Statement {
+            sid: Some("S3ReadOnlyAccess".to_string()),
+            effect: Effect::Allow,
+            action: ActionValue::Multiple(vec![
+                "s3:GetObject".to_string(),
+                "s3:GetObjectVersion".to_string(),
+                "s3:ListBucket".to_string(),
+            ]),
+            resource: ResourceValue::Single("*".to_string()),
+            condition: None,
+            principal: None,
+        }],
+    }
 }
