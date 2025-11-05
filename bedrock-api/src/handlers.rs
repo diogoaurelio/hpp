@@ -163,7 +163,7 @@ mod tests {
         http::{Request, StatusCode},
         Router,
     };
-    use bedrock_core::BedrockService;
+    use bedrock_core::{BedrockService, BedrockServiceTrait};
     use std::sync::Arc;
     use tower::ServiceExt;
 
